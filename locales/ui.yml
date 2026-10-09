@@ -21,12 +21,231 @@ app:
   tool_text_hint:
     en: Coming soon
     zh-CN: 敬请期待
+  tool_screenshot:
+    en: Screenshot
+    zh-CN: 截图
+  tool_screenshot_hint:
+    en: Capture the primary monitor
+    zh-CN: 截取主显示器全屏
   tool_convert:
     en: Format Converter
     zh-CN: 格式转换
   tool_convert_hint:
     en: Coming soon
     zh-CN: 敬请期待
+  tool_proxy:
+    en: Proxy
+    zh-CN: 代理
+  tool_proxy_hint:
+    en: VLESS subscription tunnel
+    zh-CN: VLESS 订阅直连
+  proxy_sub:
+    en: Subscription URL
+    zh-CN: 订阅地址
+  proxy_refresh:
+    en: Refresh
+    zh-CN: 更新订阅
+  proxy_fetching:
+    en: Fetching subscription…
+    zh-CN: 正在拉取订阅…
+  proxy_fetched:
+    en: Nodes loaded
+    zh-CN: 节点已加载
+  proxy_empty:
+    en: No VLESS nodes in subscription
+    zh-CN: 订阅里没有 VLESS 节点
+  proxy_nodes:
+    en: Nodes
+    zh-CN: 节点
+  proxy_start:
+    en: Connect
+    zh-CN: 启动代理
+  proxy_stop:
+    en: Disconnect
+    zh-CN: 断开
+  proxy_running:
+    en: Running
+    zh-CN: 运行中
+  proxy_stopped:
+    en: Disconnected
+    zh-CN: 已断开
+  proxy_local:
+    en: Local endpoint
+    zh-CN: 本地入口
+  proxy_need_nodes:
+    en: Refresh subscription and pick a node first
+    zh-CN: 先更新订阅并选择节点
+  proxy_started:
+    en: Tunnel is up, system proxy enabled
+    zh-CN: 隧道已建立，系统代理已打开
+  proxy_tab_sub:
+    en: Subscription
+    zh-CN: 订阅
+  proxy_speedtest:
+    en: Speed test
+    zh-CN: 测速
+  proxy_testing:
+    en: Testing latencies…
+    zh-CN: 测速中…
+  proxy_tested:
+    en: Speed test done
+    zh-CN: 测速完成
+  proxy_timeout:
+    en: Timeout
+    zh-CN: 超时
+  proxy_selfcheck:
+    en: Self-check
+    zh-CN: 自检
+  proxy_selfchecking:
+    en: Checking tunnel…
+    zh-CN: 正在自检…
+  proxy_selfcheck_ok:
+    en: Tunnel works
+    zh-CN: 自检通过
+  proxy_tab_rules:
+    en: Rules
+    zh-CN: 规则
+  proxy_lookup_hint:
+    en: Enter a domain or IP to look up routing
+    zh-CN: 输入域名或 IP 查分流
+  proxy_lookup_go:
+    en: Look up
+    zh-CN: 查询
+  proxy_tag_manual:
+    en: Manual
+    zh-CN: 手动
+  proxy_tag_auto:
+    en: Auto
+    zh-CN: 自动
+  proxy_manual_title:
+    en: Manual rules
+    zh-CN: 手动规则
+  proxy_effective_title:
+    en: Effective rules
+    zh-CN: 有效规则
+  proxy_effective_note:
+    en: Manual first, by priority
+    zh-CN: 手动在前，按优先级排列
+  proxy_auto_empty:
+    en: No auto rules yet — refresh the subscription
+    zh-CN: 暂无自动规则，先更新订阅
+  proxy_rule_add:
+    en: Add
+    zh-CN: 添加
+  proxy_add_title:
+    en: Add manual rule
+    zh-CN: 添加手动规则
+  proxy_cancel:
+    en: Cancel
+    zh-CN: 取消
+  proxy_confirm:
+    en: Confirm
+    zh-CN: 确定
+  proxy_kind_suffix:
+    en: Suffix
+    zh-CN: 后缀
+  proxy_kind_exact:
+    en: Exact
+    zh-CN: 精确
+  proxy_kind_keyword:
+    en: Keyword
+    zh-CN: 关键字
+  proxy_kind_cidr:
+    en: CIDR
+    zh-CN: 网段
+  proxy_pattern_hint:
+    en: Pattern, e.g. example.com
+    zh-CN: 内容，如 example.com
+  proxy_target_hint:
+    en: "Target: group, DIRECT or REJECT"
+    zh-CN: 目标：组名 / DIRECT / REJECT
+  proxy_bad_target:
+    en: Target must be DIRECT, REJECT or a group
+    zh-CN: 目标不在分组里
+  proxy_rule_empty:
+    en: No manual rules yet
+    zh-CN: 暂无手动规则
+  proxy_sort:
+    en: Sort
+    zh-CN: 排序
+  proxy_move_up:
+    en: Up
+    zh-CN: 上移
+  proxy_move_down:
+    en: Down
+    zh-CN: 下移
+  proxy_delete:
+    en: Delete
+    zh-CN: 删除
+  proxy_need_rule:
+    en: Pattern and target are required
+    zh-CN: 内容和目标都要填
+  proxy_bad_cidr:
+    en: Invalid CIDR, e.g. 10.0.0.0/8
+    zh-CN: 网段格式不对，如 10.0.0.0/8
+  proxy_route_direct:
+    en: Direct
+    zh-CN: 直连
+  proxy_route_reject:
+    en: Reject
+    zh-CN: 拦截
+  proxy_tab_conns:
+    en: Connections
+    zh-CN: 连接
+  proxy_filter_hint:
+    en: Filter by host
+    zh-CN: 过滤条件
+  proxy_col_host:
+    en: Host
+    zh-CN: 主机
+  proxy_col_down:
+    en: Downloaded
+    zh-CN: 下载量
+  proxy_col_up:
+    en: Uploaded
+    zh-CN: 上传量
+  proxy_col_down_speed:
+    en: Down speed
+    zh-CN: 下载速度
+  proxy_col_up_speed:
+    en: Up speed
+    zh-CN: 上传速度
+  proxy_col_chain:
+    en: Chain
+    zh-CN: 链路
+  proxy_col_rule:
+    en: Rule
+    zh-CN: 规则
+  proxy_col_process:
+    en: Process
+    zh-CN: 进程
+  proxy_col_age:
+    en: Age
+    zh-CN: 连接时间
+  proxy_col_source:
+    en: Source
+    zh-CN: 源地址
+  proxy_col_dest:
+    en: Destination
+    zh-CN: 目标地址
+  proxy_col_kind:
+    en: Type
+    zh-CN: 类型
+  proxy_active:
+    en: Active
+    zh-CN: 活跃
+  proxy_closed:
+    en: Closed
+    zh-CN: 已关闭
+  proxy_conns_empty:
+    en: No connections yet — start the proxy first
+    zh-CN: 暂无连接，先启动代理
+  proxy_kill_all:
+    en: Disconnect all
+    zh-CN: 断开全部
+  proxy_clear_closed:
+    en: Clear closed
+    zh-CN: 清除已关闭
   tool_settings:
     en: Settings
     zh-CN: 设置
@@ -54,3 +273,36 @@ app:
   settings_theme_hint:
     en: Click to apply immediately
     zh-CN: 点击切换，立即生效
+  shot_capture:
+    en: Capture fullscreen
+    zh-CN: 截取全屏
+  shot_capture_hint:
+    en: Captures the primary monitor
+    zh-CN: 截取主显示器全屏
+  shot_copy:
+    en: Copy
+    zh-CN: 复制
+  shot_save:
+    en: Save
+    zh-CN: 保存
+  shot_retake:
+    en: Retake
+    zh-CN: 重新截取
+  shot_copied:
+    en: Copied to clipboard
+    zh-CN: 已复制到剪贴板
+  shot_saved:
+    en: Saved to
+    zh-CN: 已保存到
+  shot_region:
+    en: Select region
+    zh-CN: 区域选择
+  shot_overlay_title:
+    en: Region capture
+    zh-CN: 框选截图
+  shot_hint:
+    en: Drag to select a region
+    zh-CN: 拖拽框选区域
+  shot_cancel:
+    en: Cancel
+    zh-CN: 取消

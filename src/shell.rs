@@ -1,12 +1,13 @@
 //! 应用外壳：Spur 风格自绘标题栏、侧边工具导航、内容区。
-//! 工具目前是占位项，以后每个真工具配独立视图。
+//! 只管框架：各工具的视图在各自模块里（`tools/*`、`settings/view`），
+//! 这里按 `TOOLS` 分发。跨模块调的都走 `pub(crate)`，别放出去。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::*;
 
-use crate::i18n::{LANGUAGES, Language, t};
+use crate::i18n::t;
 
 /// Spur 度量 token。
 const TITLEBAR_H: f32 = 38.0;
@@ -15,15 +16,17 @@ const HEADER_H: f32 = 44.0;
 const CAPTION_W: f32 = 46.0;
 const SIDEBAR_W: f32 = 216.0;
 
-/// 唯一的小字号阶梯（逻辑像素）。
-const TEXT_SM: f32 = 12.0;
-const TEXT_MD: f32 = 13.0;
-const TEXT_LG: f32 = 15.0;
+/// 唯一的小字号阶梯（逻辑像素）。各工具视图共用，见 `tools/*`。
+pub(crate) const TEXT_SM: f32 = 12.0;
+pub(crate) const TEXT_MD: f32 = 13.0;
+pub(crate) const TEXT_LG: f32 = 15.0;
 
 /// 工具标识：导航、标题、图标都从它派生，保证三处不脱节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolId {
     Welcome,
+    Screenshot,
+    Proxy,
     Text,
     Convert,
     Settings,
@@ -35,6 +38,10 @@ impl ToolId {
         match self {
             // “欢迎”
             ToolId::Welcome => t("app.tool_welcome"),
+            // “截图”
+            ToolId::Screenshot => t("app.tool_screenshot"),
+            // “代理”
+            ToolId::Proxy => t("app.tool_proxy"),
             // “文本工具”
             ToolId::Text => t("app.tool_text"),
             // “格式转换”
@@ -49,6 +56,10 @@ impl ToolId {
         match self {
             // “工具箱首页”
             ToolId::Welcome => t("app.tool_welcome_hint"),
+            // “截取主显示器全屏”
+            ToolId::Screenshot => t("app.tool_screenshot_hint"),
+            // “VLESS 订阅直连”
+            ToolId::Proxy => t("app.tool_proxy_hint"),
             // “敬请期待”
             ToolId::Text => t("app.tool_text_hint"),
             // “敬请期待”
@@ -71,6 +82,14 @@ const TOOLS: &[ToolDef] = &[
         icon: IconName::House,
     },
     ToolDef {
+        id: ToolId::Screenshot,
+        icon: IconName::Camera,
+    },
+    ToolDef {
+        id: ToolId::Proxy,
+        icon: IconName::Globe,
+    },
+    ToolDef {
         id: ToolId::Text,
         icon: IconName::FileText,
     },
@@ -88,17 +107,20 @@ const TOOLS: &[ToolDef] = &[
 /// （主题本体的应用走 `crate::theme`，这里只记选中态用来高亮）。
 pub struct WsShell {
     selected: usize,
-    settings_theme: String,
+    pub(crate) settings_theme: String,
+    pub(crate) shot: crate::tools::screenshot::ShotState,
+    pub(crate) proxy: crate::tools::proxy::ProxyView,
 }
 
 impl WsShell {
-    /// 创建外壳。`window` 暂时用不到；以后的工具（对话框、
-    /// 通知）会在构造时需要它，先把参数占上。
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    /// 创建外壳。各工具的状态在自己模块里建（要 `window` 和 `cx`）。
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             selected: 0,
             // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
             settings_theme: crate::theme::selected(),
+            shot: crate::tools::screenshot::ShotState::empty(),
+            proxy: crate::tools::proxy::ProxyView::new(window, cx),
         }
     }
 
@@ -258,6 +280,8 @@ impl WsShell {
     /// 真工具落地时在这里加分支，每个分支调自己视图的渲染。
     fn render_tool_body(&self, tool: &ToolDef, cx: &mut Context<Self>) -> impl IntoElement {
         match tool.id {
+            ToolId::Screenshot => self.render_shot(cx).into_any_element(),
+            ToolId::Proxy => self.render_proxy(cx).into_any_element(),
             ToolId::Settings => self.render_settings(cx).into_any_element(),
             _ => self.render_placeholder(tool, cx).into_any_element(),
         }
@@ -287,160 +311,6 @@ impl WsShell {
             )
     }
 
-    /// 设置页：“语言”和“主题”两组，一行一点即切。
-    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_1()
-            .flex_col()
-            .px(px(16.))
-            .py(px(12.))
-            .gap(px(16.))
-            // “语言”分组
-            .child(self.settings_section(
-                // “语言”
-                t("app.settings_language"),
-                // “立即生效，标题栏下次启动更新”
-                t("app.settings_language_hint"),
-                self.language_rows(cx),
-                cx,
-            ))
-            // “主题”分组
-            .child(self.settings_section(
-                // “主题”
-                t("app.settings_theme"),
-                // “点击切换，立即生效”
-                t("app.settings_theme_hint"),
-                self.theme_rows(cx),
-                cx,
-            ))
-    }
-
-    /// 设置页的一组：标题 + 副提示 + 若干选项行。
-    /// 文案走 `SharedString`：借来的 `&str` 在元素树里活不够长。
-    fn settings_section(
-        &self,
-        title: impl Into<SharedString>,
-        hint: impl Into<SharedString>,
-        rows: Vec<AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let fg = cx.theme().foreground;
-        let muted = cx.theme().muted_foreground;
-        let title: SharedString = title.into();
-        let hint: SharedString = hint.into();
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(div().text_size(px(TEXT_MD)).text_color(fg).child(title))
-                    .child(div().text_size(px(TEXT_SM)).text_color(muted).child(hint)),
-            )
-            .child(div().flex().flex_col().gap(px(2.)).children(rows))
-    }
-
-    /// 设置页通用选项行：选中高亮，悬停 wash，右侧对勾标出当前项。
-    /// 标签走 `SharedString`：借来的 `&str` 在元素树里活不够长。
-    fn option_row(
-        label: impl Into<SharedString>,
-        selected: bool,
-        row_id: ElementId,
-        on_click: impl Fn(&mut WsShell, &ClickEvent, &mut Window, &mut Context<WsShell>) + 'static,
-        cx: &mut Context<WsShell>,
-    ) -> AnyElement {
-        let row_bg = cx.theme().sidebar_accent;
-        let row_fg = cx.theme().sidebar_accent_foreground;
-        let idle_fg = cx.theme().sidebar_foreground;
-        let accent = cx.theme().link;
-        let label: SharedString = label.into();
-        let (bg, fg) = if selected {
-            (row_bg, row_fg)
-        } else {
-            (hsla(0., 0., 0., 0.), idle_fg)
-        };
-        div()
-            .id(row_id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(8.))
-            .px(px(10.))
-            .h(px(32.))
-            .rounded(px(6.))
-            .bg(bg)
-            .text_color(fg)
-            .cursor_pointer()
-            .hover(move |s| {
-                if selected {
-                    s
-                } else {
-                    s.bg(row_bg)
-                }
-            })
-            .on_click(cx.listener(on_click))
-            .child(div().flex_1().text_size(px(TEXT_MD)).child(label))
-            .children(selected.then(|| Icon::new(IconName::Check).size(px(13.)).text_color(accent)))
-            .into_any_element()
-    }
-
-    /// “语言”分组：每种语言一行（中文 / English），点即切换、即时重绘。
-    /// 行标签用各语言的自称；加新语言时 match 穷举会逼着补标签。
-    fn language_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        LANGUAGES
-            .iter()
-            .map(|lang| {
-                let lang = *lang;
-                let label = match lang {
-                    // “中文”
-                    Language::Chinese => t("app.settings_lang_zh"),
-                    // “English”
-                    Language::English => t("app.settings_lang_en"),
-                };
-                let selected = crate::i18n::language() == lang;
-                Self::option_row(
-                    label,
-                    selected,
-                    ElementId::named_usize("lang", lang as usize),
-                    move |_, _, _, cx| {
-                        crate::i18n::set_language(lang);
-                        cx.notify();
-                    },
-                    cx,
-                )
-            })
-            .collect()
-    }
-
-    /// “主题”分组：全部内置主题，一行一个，中文名见 themes/wong.json。
-    fn theme_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        crate::theme::names()
-            .into_iter()
-            .enumerate()
-            .map(|(ix, name)| {
-                let selected = self.settings_theme == name;
-                let label = name.clone();
-                Self::option_row(
-                    label,
-                    selected,
-                    ElementId::named_usize("theme", ix),
-                    move |this, _, _, cx| {
-                        // 换主题并重绘所有窗口；名字对不上时什么都不做。
-                        if crate::theme::apply(cx, &name) {
-                            this.settings_theme = name.clone();
-                        }
-                        cx.notify();
-                    },
-                    cx,
-                )
-            })
-            .collect()
-    }
 }
 
 impl Render for WsShell {
@@ -462,6 +332,19 @@ impl Render for WsShell {
                     .child(self.render_sidebar(cx))
                     .child(self.render_content(cx)),
             )
+    }
+}
+
+impl Drop for WsShell {
+    /// 退出兜底：隧道还开着就掐掉、系统代理复原、旗落下来，别把用户断网留在那。
+    /// 只动自己开过的代理（`running` 为空说明没开过，不碰用户自己的设置）。
+    /// 注意：进程被杀时 Drop 不跑，靠启动时的残留清理（见 `main.rs`）。
+    fn drop(&mut self) {
+        if let Some(handle) = self.proxy.running.take() {
+            handle.stop();
+            let _ = crate::tools::proxy::disable_system_proxy();
+            let _ = crate::settings::set_proxy_running(false);
+        }
     }
 }
 

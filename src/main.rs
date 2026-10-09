@@ -13,6 +13,7 @@ mod i18n;
 mod settings;
 mod shell;
 mod theme;
+mod tools;
 
 use std::borrow::Cow;
 
@@ -51,6 +52,16 @@ fn window_options() -> WindowOptions {
     }
 }
 
+/// 关掉我们开的系统代理并落旗：启动残留清理和退出钩子共用。
+/// 只动自己开过的（旗举着才动），绝不碰用户自己的代理设置。
+/// 失败吞掉：关机时注册表可能已经不可写，尽力而为。
+fn cleanup_owned_proxy() {
+    if crate::settings::proxy_running() {
+        let _ = crate::tools::proxy::disable_system_proxy();
+        let _ = crate::settings::set_proxy_running(false);
+    }
+}
+
 fn main() {
     // 完整图标集：默认 `Assets` 只内嵌了一小部分，侧边栏和标题栏的图标
     // 需要 AllAssets 才找得到。
@@ -63,6 +74,16 @@ fn main() {
         load_fonts(cx);
         theme::init(cx);
         crate::i18n::init();
+        // 上次非正常退出可能留下系统代理指向已死的隧道：先清掉再开窗，
+        // 不然用户一启动就断网，还以为是新 bug。
+        cleanup_owned_proxy();
+
+        // 正常退出也要清系统代理：Drop 不一定跑（被杀更不会），钩子兜底。
+        // detach 让钩子活到进程结束，不然闭包结束就注销了。
+        cx.on_app_quit(|_| async move {
+            cleanup_owned_proxy();
+        })
+        .detach();
 
         open_window(window_options(), cx, |window, cx| {
             cx.new(|cx| shell::WsShell::new(window, cx))

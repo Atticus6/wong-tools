@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "skills/gpui-kit/SKILL.md",
       "computedHash": "d941aafe95226b546f4498bc21be3376284f071fe0ab96b38aa770ae71497b9c"
+    },
+    "gpui-kit-design-guides": {
+      "source": "longbridge/gpui-kit",
+      "sourceType": "github",
+      "skillPath": "skills/gpui-kit-design-guides/SKILL.md",
+      "computedHash": "1dc12103913002f85e4675635146572516e6a86dc96d0fda1a9f7347b82fec90"
     }
   }
 }
