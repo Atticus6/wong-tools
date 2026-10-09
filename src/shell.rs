@@ -18,6 +18,8 @@ const TEXT_SM: f32 = 12.0;
 const TEXT_MD: f32 = 13.0;
 const TEXT_LG: f32 = 15.0;
 
+/// One sidebar entry. Real tools replace the placeholder `hint` with
+/// their own view; the entry itself stays a name + icon + hint triple.
 struct ToolDef {
     name: &'static str,
     hint: &'static str,
@@ -47,11 +49,14 @@ const TOOLS: &[ToolDef] = &[
     },
 ];
 
+/// Root view of the main window: owns the selected tool index.
 pub struct WsShell {
     selected: usize,
 }
 
 impl WsShell {
+    /// Create the shell. `window` is unused for now; later tools (dialogs,
+    /// toasts) will need it at construction time.
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self { selected: 0 }
     }
@@ -285,4 +290,30 @@ fn caption_controls(window: &Window, muted: Hsla, fg: Hsla) -> Vec<AnyElement> {
             .into_any_element()
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    // NOTE: do NOT `use super::*` here — it would pull gpui's own `#[test]`
+    // macro into scope and shadow the built-in test attribute. Import only
+    // what the tests need.
+    use super::TOOLS;
+
+    #[test]
+    fn sidebar_tools_are_registered_without_duplicates() {
+        // The sidebar renders one row per entry; an empty or duplicated
+        // table would show a broken navigation.
+        assert!(!TOOLS.is_empty(), "TOOLS needs at least one entry");
+        let mut names = Vec::new();
+        for tool in TOOLS {
+            assert!(!tool.name.is_empty(), "tool name must not be empty");
+            assert!(!tool.hint.is_empty(), "tool hint must not be empty");
+            assert!(
+                !names.contains(&tool.name),
+                "duplicate sidebar entry {}",
+                tool.name
+            );
+            names.push(tool.name);
+        }
+    }
 }

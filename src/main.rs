@@ -60,3 +60,34 @@ fn main() {
         .expect("Failed to open window");
     });
 }
+
+#[cfg(test)]
+mod tests {
+    // NOTE: do NOT `use super::*` here — it would pull gpui's own `#[test]`
+    // macro into scope and shadow the built-in test attribute. Import only
+    // what the tests need.
+    use super::window_options;
+    use gpui_kit::px;
+
+    #[test]
+    fn window_uses_transparent_titlebar_and_sane_bounds() {
+        // The shell draws its own 38px title bar, so the OS caption must
+        // stay hidden; a regression here would show two title bars.
+        let opts = window_options();
+        let titlebar = opts.titlebar.expect("custom titlebar options");
+        assert!(
+            titlebar.appears_transparent,
+            "OS caption must be hidden for the custom title bar"
+        );
+        assert_eq!(
+            titlebar.title.as_deref(),
+            Some("Wong Tools"),
+            "window title drifted"
+        );
+        let min = opts.window_min_size.expect("minimum window size");
+        assert!(
+            min.width >= px(800.) && min.height >= px(500.),
+            "minimum size too small for title bar + sidebar: {min:?}"
+        );
+    }
+}
