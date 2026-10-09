@@ -97,7 +97,8 @@ impl WsShell {
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
             selected: 0,
-            settings_theme: crate::theme::DEFAULT_NAME.to_string(),
+            // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
+            settings_theme: crate::theme::selected(),
         }
     }
 
@@ -518,13 +519,15 @@ mod tests {
     // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::TOOLS;
     use crate::i18n::{LANGUAGES, language, lock_locale, set_language};
+    use crate::settings::TempSettings;
 
     #[test]
     fn sidebar_tools_are_registered_without_duplicates() {
         // 侧边栏按表渲染，一行一项；表空了或重名导航就坏了。
         assert!(!TOOLS.is_empty(), "TOOLS 至少要有一项");
-        // 改全局 locale 的测试要串行；测完把语言还原，不影响其他测试。
+        // 改全局 locale 的测试要串行；切语言会写库，指向临时文件。
         let _guard = lock_locale();
+        let _settings = TempSettings::install("shell-tools");
         let prev = language();
         for lang in LANGUAGES {
             set_language(*lang);

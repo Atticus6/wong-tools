@@ -26,9 +26,17 @@ pub fn code(lang: Language) -> &'static str {
     }
 }
 
-/// 启动时调用一次，从 `WONG_LANG` 装入语言。
+/// 启动时调用一次：持久化的选择优先，其次看 `WONG_LANG`，都没有用中文。
+/// 选出来的值会再存一遍（比如这次是环境变量定的，下次启动就不用再传了）。
 pub fn init() {
-    set_language(language_from_env());
+    set_language(persisted_language().unwrap_or_else(language_from_env));
+}
+
+/// 持久化的语言：存的代码必须还在支持列表里，否则当没存过
+/// （比如将来 locale 改名了，旧值不能把界面卡死）。
+fn persisted_language() -> Option<Language> {
+    let saved = crate::settings::language_code()?;
+    LANGUAGES.iter().find(|l| code(**l) == saved).copied()
 }
 
 /// 环境变量选中的语言：只有显式要求英文才切过去，其他一律中文。
@@ -48,10 +56,14 @@ pub fn language() -> Language {
     }
 }
 
-/// 切换语言，已打开的视图要自己 `cx.notify()` 才重绘；
+/// 切换语言并持久化，已打开的视图要自己 `cx.notify()` 才重绘；
 /// 标题栏等窗口级文字下次启动更新。
 pub fn set_language(lang: Language) {
     gpui_kit::component::set_locale(code(lang));
+    // 语言已经切了，持久化失败只记一笔日志。
+    if let Err(e) = crate::settings::set_language_code(code(lang)) {
+        eprintln!("存语言失败: {e}");
+    }
 }
 
 /// 取应用文案。key 缺失时返回 key 本身，不要拿它当断言用，见测试。
@@ -85,6 +97,7 @@ mod tests {
     use super::t;
     use super::LANGUAGES;
     use super::Language;
+    use crate::settings::TempSettings;
 
     /// 全部应用文案 key，加 key 时同步加这里，全量校验靠它覆盖。
     const KEYS: &[&str] = &[
@@ -137,6 +150,8 @@ mod tests {
         // 每种语言下每个 key 都必须有东西；缺 key 时 t() 会原样返回 key，
         // 界面上会直接露出 key，所以这里把“返回 key”也算失败。
         let _guard = lock_locale();
+        // 切语言会写库，指向临时文件，不碰真实数据目录。
+        let _settings = TempSettings::install("i18n-keys");
         let prev = language();
         for lang in LANGUAGES {
             set_language(*lang);
@@ -155,6 +170,8 @@ mod tests {
     fn switching_language_switches_strings() {
         // 切换前后读到的必须是对应语言的表；测完还原，不影响其他测试。
         let _guard = lock_locale();
+        // 切语言会写库，指向临时文件，不碰真实数据目录。
+        let _settings = TempSettings::install("i18n-switch");
         let prev = language();
         set_language(Language::English);
         assert_eq!(t("app.new_tool"), "New");

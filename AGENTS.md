@@ -69,6 +69,12 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   互相覆盖。
 - 语言运行时可切（`set_language` + `cx.notify()` 即时重绘），窗口标题
   等窗口级文字需重启生效；主题用 `theme::apply` 即时切换并重绘所有窗口。
+- 设置持久化走 libsql 本地库（`src/settings.rs`，单张键值表）：
+  Windows 在 `%APPDATA%\WongTools\settings.db`。读写失败只记日志不崩；
+  `theme::apply` / `i18n::set_language` 内部顺手持久化，调用方不用管。
+- 测持久化必须隔离：直连用 `open(temp路径)`，走公共 API 的用
+  `TempSettings` 把 `WONG_SETTINGS_DB` 指向临时文件（配合
+  `lock_locale()` 串行）。绝不碰真实数据目录。
 - 每个 `.rs` 文件首行必须有 `//!` 模块文档，说明职责与归属。
 - 所有 `pub` 项必须有 `///` 文档注释；魔法数字必须命名为常量并注明
   来源（如 `CAPTION_W = 46.0` 是 Windows 原生标题栏按钮宽度）。
