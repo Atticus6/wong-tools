@@ -136,7 +136,11 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - 语言运行时可切（`set_language` + `cx.notify()` 即时重绘），窗口标题
   等窗口级文字需重启生效；主题用 `theme::apply` 即时切换并重绘所有窗口。
 - 设置持久化走 libsql 本地库（`src/settings.rs`，键值表 + 自动规则表
-  `proxy_rules_auto`）：Windows 在 `%APPDATA%\WongTools\settings.db`。
+  `proxy_rules_auto`）：Windows 在 `%APPDATA%\WongTools\settings.db`，
+  macOS 在 `~/Library/Application Support/WongTools/settings.db`。
+  窗口位置（`window_bounds`，含最大化旗）启动恢复、越界居中，
+  侧边栏选中（`selected_tool`）随点随存；位置平时 render 节流存、
+  退出钩子补尾巴。
   订阅的节点/分组走小 JSON，8 万条自动规则走独立表（`pos` 保序，先清
   后插一个事务；旧大 JSON 键只读一次迁移，迁完即删）。读写失败只记日志不崩；
   `theme::apply` / `i18n::set_language` 内部顺手持久化，调用方不用管。

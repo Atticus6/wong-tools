@@ -19,6 +19,8 @@ pub mod view;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 const DB_FILE: &str = "settings.db";
 const KEY_THEME: &str = "theme";
 const KEY_LANGUAGE: &str = "language";
@@ -38,6 +40,10 @@ const KEY_PROXY_MANUAL: &str = "proxy_manual_rules";
 /// 隧道开着的旗（"1" = 我们开了系统代理）：正常停就清掉，
 /// 启动时还看到它，说明上次没收尾，先清系统代理再开窗。
 const KEY_PROXY_RUNNING: &str = "proxy_running";
+/// 主窗口上次的位置大小（JSON，逻辑像素 + 是否最大化）。
+const KEY_WINDOW_BOUNDS: &str = "window_bounds";
+/// 侧边栏上次选中的工具序号。
+const KEY_SELECTED_TOOL: &str = "selected_tool";
 
 /// 应用数据目录（平台相关，见模块文档）。
 pub fn data_dir() -> PathBuf {
@@ -461,6 +467,62 @@ pub fn set_proxy_running(running: bool) -> Result<(), String> {
     })
 }
 
+/// 主窗口位置快照：逻辑像素矩形 + 关闭时是否最大化，
+/// 启动恢复用（`main.rs` 负责校验越界，存只管记）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindowBounds {
+    /// 全局坐标系左上角（逻辑像素）。
+    pub x: f32,
+    /// 全局坐标系左上角（逻辑像素）。
+    pub y: f32,
+    /// 窗口宽（逻辑像素）。
+    pub w: f32,
+    /// 窗口高（逻辑像素）。
+    pub h: f32,
+    /// 关闭时是否最大化：是则下次照样最大化打开。
+    pub maximized: bool,
+}
+
+/// 读上次的窗口位置；没存过、JSON 烂了、库坏了都返回 `None`，
+/// 调用方回落默认位置居中。
+pub fn window_bounds() -> Option<SavedWindowBounds> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_WINDOW_BOUNDS).await.ok()?
+    })?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// 存窗口位置（移动/缩放节流调 + 退出时调，调用方节流）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_window_bounds(bounds: &SavedWindowBounds) -> Result<(), String> {
+    let raw =
+        serde_json::to_string(bounds).map_err(|e| format!("序列化窗口位置失败: {e}"))?;
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_WINDOW_BOUNDS, &raw).await
+    })
+}
+
+/// 读上次选中的工具序号；没有、非法、库坏了都返回 `None`，
+/// 调用方回落 0（欢迎页），序号越界调用方自己夹。
+pub fn selected_tool() -> Option<usize> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_SELECTED_TOOL).await.ok()?
+    })?;
+    raw.parse().ok()
+}
+
+/// 存选中的工具序号（点侧边栏即调，低频）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_selected_tool(ix: usize) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_SELECTED_TOOL, &ix.to_string()).await
+    })
+}
+
 /// 测试隔离器：把设置库指向临时文件，drop 时还原指向并删除临时文件。
 /// 必须在 `i18n::lock_locale()` 之后使用（和改 locale 的测试同串行）。
 #[cfg(test)]
@@ -771,5 +833,44 @@ mod tests {
             "数据目录名不对: {}",
             data_dir().display()
         );
+    }
+
+    #[test]
+    fn window_state_roundtrip_through_public_api() {
+        // 窗口位置 + 选中工具走公共 API 往返：空库读 None，写完读回一致。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("window-state");
+        use super::SavedWindowBounds;
+        use super::selected_tool;
+        use super::set_selected_tool;
+        use super::set_window_bounds;
+        use super::window_bounds;
+        assert_eq!(window_bounds(), None, "没存过读 None");
+        assert_eq!(selected_tool(), None, "没存过读 None");
+        let saved = SavedWindowBounds {
+            x: 80.0,
+            y: 60.0,
+            w: 1280.0,
+            h: 800.0,
+            maximized: false,
+        };
+        set_window_bounds(&saved).expect("能写窗口位置");
+        set_selected_tool(2).expect("能写选中工具");
+        assert_eq!(window_bounds(), Some(saved), "窗口位置往返一致");
+        assert_eq!(selected_tool(), Some(2), "选中工具往返一致");
+        // 最大化旗和非法序号：旗照存，非法序号读 None（调用方回落欢迎页）。
+        let maxed = SavedWindowBounds { maximized: true, ..saved };
+        set_window_bounds(&maxed).expect("能写最大化");
+        assert_eq!(window_bounds(), Some(maxed), "最大化旗不能丢");
+        super::block_on(async {
+            let path = std::env::var("WONG_SETTINGS_DB").expect("临时库已指向");
+            let conn = super::open(std::path::Path::new(&path))
+                .await
+                .expect("测试库能打开");
+            super::set(&conn, super::KEY_SELECTED_TOOL, "abc")
+                .await
+                .expect("能种坏数据");
+        });
+        assert_eq!(selected_tool(), None, "非法序号读 None");
     }
 }

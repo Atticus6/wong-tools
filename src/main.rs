@@ -33,9 +33,113 @@ fn load_fonts(cx: &mut App) {
         .expect("failed to load bundled Geist fonts");
 }
 
+/// 默认窗口大小（逻辑像素）：第一版写死的 1280x800，没存档时用它。
+const DEFAULT_WIN_W: f32 = 1280.0;
+const DEFAULT_WIN_H: f32 = 800.0;
+/// 最小窗口（逻辑像素）：和 `window_min_size` 同一对值，恢复时小于它按它夹。
+const MIN_WIN_W: f32 = 880.0;
+const MIN_WIN_H: f32 = 600.0;
+/// 显示器一块都拿不到时的回落原点（原来写死的 80,60，无头测试才走这里）。
+const FALLBACK_ORIGIN_X: f32 = 80.0;
+const FALLBACK_ORIGIN_Y: f32 = 60.0;
+
+/// 启动落位结果：矩形 + 是否最大化，纯数据不碰 IO。
+struct RestoredPlacement {
+    bounds: Bounds<Pixels>,
+    maximized: bool,
+}
+
+/// 启动落位纯逻辑：存档中心还在某块屏可见区内就用存档（尺寸夹到最小值
+/// 和主屏之间），显示器拔掉/分辨率变了导致完全跑出去就按默认大小在主屏
+/// 居中。不碰 IO，单测直接喂矩形。
+fn place_window(
+    saved: Option<crate::settings::SavedWindowBounds>,
+    displays: &[Bounds<Pixels>],
+) -> RestoredPlacement {
+    // 主屏：`cx.displays()` 顺序主屏在前，拿第一块。
+    let primary = displays.first();
+    // 按给定大小在主屏可见区居中：屏比窗小先缩窗，保证整个窗看得见。
+    let center_on_primary = |w: f32, h: f32| -> Bounds<Pixels> {
+        match primary {
+            Some(screen) => {
+                let sw = screen.size.width.as_f32();
+                let sh = screen.size.height.as_f32();
+                let (w, h) = (w.min(sw), h.min(sh));
+                Bounds {
+                    origin: point(
+                        px(screen.origin.x.as_f32() + (sw - w) / 2.),
+                        px(screen.origin.y.as_f32() + (sh - h) / 2.),
+                    ),
+                    size: size(px(w), px(h)),
+                }
+            }
+            None => Bounds {
+                origin: point(px(FALLBACK_ORIGIN_X), px(FALLBACK_ORIGIN_Y)),
+                size: size(px(w), px(h)),
+            },
+        }
+    };
+    let Some(saved) = saved else {
+        return RestoredPlacement {
+            bounds: center_on_primary(DEFAULT_WIN_W, DEFAULT_WIN_H),
+            maximized: false,
+        };
+    };
+    // 存档中心落在某块屏可见区内才算还在，不在就居中（拔显示器场景）。
+    let center_x = saved.x + saved.w / 2.;
+    let center_y = saved.y + saved.h / 2.;
+    let on_screen = displays.iter().any(|d| {
+        let (ox, oy, dw, dh) = (
+            d.origin.x.as_f32(),
+            d.origin.y.as_f32(),
+            d.size.width.as_f32(),
+            d.size.height.as_f32(),
+        );
+        center_x >= ox && center_x < ox + dw && center_y >= oy && center_y < oy + dh
+    });
+    if !on_screen {
+        return RestoredPlacement {
+            bounds: center_on_primary(DEFAULT_WIN_W, DEFAULT_WIN_H),
+            maximized: false,
+        };
+    }
+    // 还在：原点不动（允许跨屏 straddle，只要标题栏可抓），尺寸夹到
+    // [最小值, 主屏]，4K 屏搬到小屏也不会撑出去。
+    let (cap_w, cap_h) = primary
+        .map(|s| (s.size.width.as_f32(), s.size.height.as_f32()))
+        .unwrap_or((DEFAULT_WIN_W, DEFAULT_WIN_H));
+    RestoredPlacement {
+        bounds: Bounds {
+            origin: point(px(saved.x), px(saved.y)),
+            size: size(
+                px(saved.w.max(MIN_WIN_W).min(cap_w)),
+                px(saved.h.max(MIN_WIN_H).min(cap_h)),
+            ),
+        },
+        maximized: saved.maximized,
+    }
+}
+
 /// Spur 风格窗口：藏掉系统标题栏，自己画。Windows 上平台保留缩放边框，
 /// 拖拽区命中测试（拖拽、Snap Layouts、双击缩放）仍由系统原生接管。
-fn window_options() -> WindowOptions {
+/// 位置大小走上次存档（越界回正中），见 `place_window`。
+fn window_options(cx: &App) -> WindowOptions {
+    let displays: Vec<Bounds<Pixels>> = cx
+        .displays()
+        .iter()
+        .map(|d| d.visible_bounds())
+        .collect();
+    let placed = place_window(crate::settings::window_bounds(), &displays);
+    window_options_with_bounds(if placed.maximized {
+        WindowBounds::Maximized(placed.bounds)
+    } else {
+        WindowBounds::Windowed(placed.bounds)
+    })
+}
+
+/// 窗口参数组装（纯构造，好单测）：标题栏、最小尺寸都在这，
+/// 落位矩形调用方算好传进来。
+fn window_options_with_bounds(window_bounds: WindowBounds) -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
             // “Wong Tools”
@@ -43,11 +147,8 @@ fn window_options() -> WindowOptions {
             appears_transparent: true,
             traffic_light_position: None,
         }),
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(80.), px(60.)),
-            size: size(px(1280.), px(800.)),
-        })),
-        window_min_size: Some(size(px(880.), px(600.))),
+        window_bounds: Some(window_bounds),
+        window_min_size: Some(size(px(MIN_WIN_W), px(MIN_WIN_H))),
         ..WindowOptions::default()
     }
 }
@@ -78,15 +179,38 @@ fn main() {
         // 不然用户一启动就断网，还以为是新 bug。
         cleanup_owned_proxy();
 
-        // 正常退出也要清系统代理：Drop 不一定跑（被杀更不会），钩子兜底。
-        // detach 让钩子活到进程结束，不然闭包结束就注销了。
-        cx.on_app_quit(|_| async move {
-            cleanup_owned_proxy();
-        })
-        .detach();
-
-        open_window(window_options(), cx, |window, cx| {
+        // 正常退出也要清系统代理 + 存窗口位置：Drop 不一定跑（被杀更不会），
+        // 钩子兜底。render 节流存 covers 平时的移动/缩放，这里补节流窗口
+        // 内的尾巴。detach 让钩子活到进程结束，不然闭包结束就注销了。
+        open_window(window_options(cx), cx, |window, cx| {
             cx.new(|cx| shell::WsShell::new(window, cx))
+        })
+        .map(|(main_window, _)| {
+            // future 要求 'static 不能借 `cx`：读窗和写库都在闭包同步段做完，
+            // 只回一个空 future。
+            cx.on_app_quit(move |cx: &mut App| {
+                cleanup_owned_proxy();
+                // 窗口已经没了就跳过（`update` 返回 Err），不写脏数据。
+                let saved = main_window
+                    .update(cx, |_, window, _| {
+                        let bounds = window.bounds();
+                        crate::settings::SavedWindowBounds {
+                            x: bounds.origin.x.as_f32(),
+                            y: bounds.origin.y.as_f32(),
+                            w: bounds.size.width.as_f32(),
+                            h: bounds.size.height.as_f32(),
+                            maximized: window.is_maximized(),
+                        }
+                    })
+                    .ok();
+                if let Some(saved) = saved {
+                    if let Err(e) = crate::settings::set_window_bounds(&saved) {
+                        eprintln!("存窗口位置失败: {e}");
+                    }
+                }
+                async {}
+            })
+            .detach();
         })
         .expect("Failed to open window");
     });
@@ -96,14 +220,45 @@ fn main() {
 mod tests {
     // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
     // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
-    use super::window_options;
+    use super::place_window;
+    use super::window_options_with_bounds;
+    use super::DEFAULT_WIN_H;
+    use super::DEFAULT_WIN_W;
+    use super::MIN_WIN_H;
+    use super::MIN_WIN_W;
     use gpui_kit::px;
+    use gpui_kit::size;
+    use gpui_kit::point;
+    use gpui_kit::Bounds;
+    use gpui_kit::WindowBounds;
+
+    /// 单屏（主屏 2560x1440，原点 0,0），各单测共用。
+    fn one_screen() -> Vec<Bounds<gpui_kit::Pixels>> {
+        vec![Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(2560.), px(1440.)),
+        }]
+    }
+
+    /// 存档矩形，调用方按需改字段。
+    fn saved_at(x: f32, y: f32) -> crate::settings::SavedWindowBounds {
+        crate::settings::SavedWindowBounds {
+            x,
+            y,
+            w: DEFAULT_WIN_W,
+            h: DEFAULT_WIN_H,
+            maximized: false,
+        }
+    }
 
     #[test]
     fn window_uses_transparent_titlebar_and_sane_bounds() {
         // 外壳自己画了 38px 标题栏，系统标题栏必须藏掉；
         // 这里回退了就会看到两个标题栏。
-        let opts = window_options();
+        let opts = window_options_with_bounds(WindowBounds::Windowed(Bounds {
+            origin: point(px(80.), px(60.)),
+            size: size(px(DEFAULT_WIN_W), px(DEFAULT_WIN_H)),
+        }));
         let titlebar = opts.titlebar.expect("需要自绘标题栏参数");
         assert!(
             titlebar.appears_transparent,
@@ -119,5 +274,68 @@ mod tests {
             min.width >= px(800.) && min.height >= px(500.),
             "最小尺寸太小，装不下标题栏 + 侧边栏：{min:?}"
         );
+    }
+
+    #[test]
+    fn saved_placement_is_kept_when_still_on_screen() {
+        // 存档中心还在屏内：原点原样回来，最大化旗带着。
+        let mut saved = saved_at(100., 100.);
+        saved.maximized = true;
+        let placed = place_window(Some(saved), &one_screen());
+        assert!(placed.maximized, "最大化旗不能丢");
+        assert_eq!(placed.bounds.origin, point(px(100.), px(100.)));
+        assert_eq!(
+            placed.bounds.size,
+            size(px(DEFAULT_WIN_W), px(DEFAULT_WIN_H))
+        );
+    }
+
+    #[test]
+    fn missing_or_offscreen_placement_centers_default_on_primary() {
+        // 没存档：默认大小在主屏居中。
+        let placed = place_window(None, &one_screen());
+        assert!(!placed.maximized);
+        assert_eq!(
+            placed.bounds.size,
+            size(px(DEFAULT_WIN_W), px(DEFAULT_WIN_H))
+        );
+        assert_eq!(
+            placed.bounds.origin,
+            point(px((2560. - DEFAULT_WIN_W) / 2.), px((1440. - DEFAULT_WIN_H) / 2.))
+        );
+        // 存档飞出去了（显示器拔掉）：同样回正中，不记住最大化。
+        let mut off = saved_at(5000., 5000.);
+        off.maximized = true;
+        let placed = place_window(Some(off), &one_screen());
+        assert!(!placed.maximized, "越界了就别最大化");
+        assert_eq!(
+            placed.bounds.origin,
+            point(px((2560. - DEFAULT_WIN_W) / 2.), px((1440. - DEFAULT_WIN_H) / 2.))
+        );
+        // 一块屏都没有（无头）：回落固定原点，别崩。
+        let placed = place_window(None, &[]);
+        assert_eq!(placed.bounds.origin, point(px(80.), px(60.)));
+    }
+
+    #[test]
+    fn tiny_or_oversized_placement_is_clamped() {
+        // 存得太小：夹到最小窗口。
+        let tiny = crate::settings::SavedWindowBounds {
+            x: 100.,
+            y: 100.,
+            w: 100.,
+            h: 100.,
+            maximized: false,
+        };
+        let placed = place_window(Some(tiny), &one_screen());
+        assert_eq!(placed.bounds.size, size(px(MIN_WIN_W), px(MIN_WIN_H)));
+        // 屏比默认窗还小：缩窗居中，保证整个窗看得见。
+        let small = vec![Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(800.), px(500.)),
+        }];
+        let placed = place_window(None, &small);
+        assert_eq!(placed.bounds.size, size(px(800.), px(500.)));
+        assert_eq!(placed.bounds.origin, point(px(0.), px(0.)));
     }
 }

@@ -110,18 +110,71 @@ pub struct WsShell {
     pub(crate) settings_theme: String,
     pub(crate) shot: crate::tools::screenshot::ShotState,
     pub(crate) proxy: crate::tools::proxy::ProxyView,
+    /// 上次写入库的窗口矩形 + 最大化：render 里做变化检测的基线。
+    bounds_snapshot: Option<(Bounds<Pixels>, bool)>,
+    /// 上次写库时间：移动/缩放节流用，见 `maybe_save_window_bounds`。
+    bounds_saved_at: std::time::Instant,
 }
+
+/// 两次写库的最小间隔：拖拽缩放时 render 来得很密，变了也得等够这点
+/// 时间才记库，不然本地库被写冒烟。
+const BOUNDS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl WsShell {
     /// 创建外壳。各工具的状态在自己模块里建（要 `window` 和 `cx`）。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
-            selected: 0,
+            // 上次选中的工具：序号越界（工具增删）回落欢迎页。
+            selected: crate::settings::selected_tool()
+                .filter(|ix| *ix < TOOLS.len())
+                .unwrap_or(0),
             // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
             settings_theme: crate::theme::selected(),
             shot: crate::tools::screenshot::ShotState::empty(),
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
+            // 存档只做基线（开窗落位是 `main.rs` 的事，这里不校验越界），
+            // 启动后 2 秒内不写：构造期首帧 bounds 不可靠，先让它落定。
+            bounds_snapshot: crate::settings::window_bounds().map(|s| {
+                (
+                    Bounds {
+                        origin: point(px(s.x), px(s.y)),
+                        size: size(px(s.w), px(s.h)),
+                    },
+                    s.maximized,
+                )
+            }),
+            bounds_saved_at: std::time::Instant::now(),
         }
+    }
+
+    /// render 里调：窗口矩形/最大化变了、且距离上次写库超节流窗口才记库。
+    /// 配上 `main.rs` 的退出钩子：render 存 cover 平时，退出存补尾巴。
+    /// gpui-kit 0.7 没有 bounds 变更监听，只能借 render（移动/缩放后必跑）。
+    fn maybe_save_window_bounds(&mut self, window: &Window) {
+        let bounds = window.bounds();
+        if bounds.size.width.as_f32() <= 0. || bounds.size.height.as_f32() <= 0. {
+            return;
+        }
+        let snapshot = (bounds, window.is_maximized());
+        if Some(snapshot) == self.bounds_snapshot {
+            return;
+        }
+        if self.bounds_saved_at.elapsed() < BOUNDS_SAVE_INTERVAL {
+            return;
+        }
+        let saved = crate::settings::SavedWindowBounds {
+            x: bounds.origin.x.as_f32(),
+            y: bounds.origin.y.as_f32(),
+            w: bounds.size.width.as_f32(),
+            h: bounds.size.height.as_f32(),
+            maximized: snapshot.1,
+        };
+        // 写库失败只记日志：位置丢了下次居中，不值得崩。
+        if let Err(e) = crate::settings::set_window_bounds(&saved) {
+            eprintln!("存窗口位置失败: {e}");
+        }
+        self.bounds_snapshot = Some(snapshot);
+        self.bounds_saved_at = std::time::Instant::now();
     }
 
     fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -254,6 +307,10 @@ impl WsShell {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = ix;
+                        // 点即存：下次打开回到这一页，崩了也不丢。
+                        if let Err(e) = crate::settings::set_selected_tool(ix) {
+                            eprintln!("存选中工具失败: {e}");
+                        }
                         cx.notify();
                     }))
                     .child(Icon::new(tool.icon.clone()).size(px(14.)))
@@ -334,6 +391,8 @@ impl Render for WsShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
+        // 窗口位置节流存：移动/缩放后 render 必跑，在这做变化检测最省事。
+        self.maybe_save_window_bounds(window);
 
         div()
             .flex()
