@@ -180,8 +180,7 @@ fn main() {
         cleanup_owned_proxy();
 
         // 正常退出也要清系统代理 + 存窗口位置：Drop 不一定跑（被杀更不会），
-        // 钩子兜底。render 节流存 covers 平时的移动/缩放，这里补节流窗口
-        // 内的尾巴。detach 让钩子活到进程结束，不然闭包结束就注销了。
+        // 钩子兜底。detach 让钩子活到进程结束，不然闭包结束就注销了。
         open_window(window_options(cx), cx, |window, cx| {
             cx.new(|cx| shell::WsShell::new(window, cx))
         })
