@@ -10,13 +10,15 @@ gpui-kit = "0.7.1"
 image = "0.25"
 libsql = "0.9"
 native-tls = "0.2"
+rand = "0.8"
 rust-i18n = "4.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 smallvec = "1"
 tokio = { version = "1", features = ["rt"] }
 tungstenite = { version = "0.24", features = ["native-tls"] }
-ureq = "2.10"
+ureq = { version = "2.10", features = ["json"] }
 xcap = "0.9"
 
 # gpui-kit 官方文档推荐：只优化框架依赖的 Debug 运行时性能，

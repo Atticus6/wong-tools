@@ -73,6 +73,21 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   连接遥测走 `ConnRegistry`（`Mutex` 换手）：中继按块记上下行，规则文本 +
   分组链登记，界面每秒读快照算速率；进程列暂空（Windows 按连接归因进程
   要 IP Helper 轮询，以后再做）。
+- `src/tools/airelay/`——AI 转发：本地 OpenAI / Anthropic 兼容网关
+  （`127.0.0.1:11459`，端口可改），把请求转到 Zen 免费车道（zen-gate
+  核心逻辑的 Rust 移植：会话铸造 + 指纹头 + 工具四件套，三线按模型分流
+  chat / responses / messages）。`zen.rs` 纯协议（单测全覆盖，不碰网络）、
+  `server.rs` 最小 HTTP/1.1（标准库 TCP，上游走 ureq 阻塞读 SSE）、
+  `view.rs` 工具页（开关/端口/模型表/请求日志）。目录走上游
+  `GET /zen/v1/models`（10 分钟缓存，失败吃旧的/硬编码兜底）。
+  模型页是卡片单选，选中持久化并热换进网关，
+  所有请求改写成它（日志里记 `请求→实际`）；没选过默认第一张，
+  永远强制，没有跟随模式。请求日志写穿进库（`airelay_requests` 表，
+  100 条封顶，重启自动回来），界面是官方 DataTable。
+  出站走代理决策（`server.rs::egress_proxy`）：隧道没在听直连，
+  听着按代理规则判 `opencode.ai`（DIRECT 裸连、REJECT 报错、
+  落节点走 `127.0.0.1:10809` CONNECT），界面心跳显示直连/代理/拦截。
+  阻塞式线程模型，不引入新异步运行时；上游调用扔连接线程，别卡界面。
 - 冻结帧走 `RenderImage` 直显（RGBA→BGRA 自己换一次）：全分辨率 PNG
   编解码在 debug 下要几秒，覆盖层必须零编码打开。开窗尺寸用传进去的
   逻辑界，别读构造期的 `window.bounds()`（不可靠）。

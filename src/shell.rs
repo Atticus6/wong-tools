@@ -27,6 +27,7 @@ enum ToolId {
     Welcome,
     Screenshot,
     Proxy,
+    AiRelay,
     Text,
     Convert,
     Settings,
@@ -42,6 +43,8 @@ impl ToolId {
             ToolId::Screenshot => t("app.tool_screenshot"),
             // “代理”
             ToolId::Proxy => t("app.tool_proxy"),
+            // “AI 转发”
+            ToolId::AiRelay => t("app.tool_airelay"),
             // “文本工具”
             ToolId::Text => t("app.tool_text"),
             // “格式转换”
@@ -60,6 +63,8 @@ impl ToolId {
             ToolId::Screenshot => t("app.tool_screenshot_hint"),
             // “VLESS 订阅直连”
             ToolId::Proxy => t("app.tool_proxy_hint"),
+            // “Zen 免费模型网关”
+            ToolId::AiRelay => t("app.tool_airelay_hint"),
             // “敬请期待”
             ToolId::Text => t("app.tool_text_hint"),
             // “敬请期待”
@@ -90,6 +95,10 @@ const TOOLS: &[ToolDef] = &[
         icon: IconName::Globe,
     },
     ToolDef {
+        id: ToolId::AiRelay,
+        icon: IconName::Bot,
+    },
+    ToolDef {
         id: ToolId::Text,
         icon: IconName::FileText,
     },
@@ -117,10 +126,11 @@ pub(crate) struct ToolEntry {
 /// 侧边栏顺序的工具入口（聚光搜索跳转命令用）。
 pub(crate) fn tool_entries() -> Vec<ToolEntry> {
     const KEYWORDS: &[&str] = &[
-        // 欢迎 / 截图 / 代理 / 文本工具 / 格式转换 / 设置
+        // 欢迎 / 截图 / 代理 / AI 转发 / 文本工具 / 格式转换 / 设置
         "welcome home start",
         "screenshot capture printscreen",
         "proxy vless vpn tunnel",
+        "ai relay zen models gateway",
         "text tools",
         "convert format transform",
         "settings preferences hotkey",
@@ -152,6 +162,7 @@ pub struct WsShell {
     pub(crate) shot: crate::tools::screenshot::ShotState,
     pub(crate) proxy: crate::tools::proxy::ProxyView,
     pub(crate) spotlight: crate::spotlight::SpotlightView,
+    pub(crate) airelay: crate::tools::airelay::view::AiRelayView,
 }
 
 impl WsShell {
@@ -167,6 +178,7 @@ impl WsShell {
             shot: crate::tools::screenshot::ShotState::empty(),
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
             spotlight: crate::spotlight::SpotlightView::new(cx),
+            airelay: crate::tools::airelay::view::AiRelayView::new(window, cx),
         }
     }
 
@@ -355,6 +367,7 @@ impl WsShell {
         match tool.id {
             ToolId::Screenshot => self.render_shot(cx).into_any_element(),
             ToolId::Proxy => self.render_proxy(cx).into_any_element(),
+            ToolId::AiRelay => self.render_airelay(cx).into_any_element(),
             ToolId::Settings => self.render_settings(cx).into_any_element(),
             _ => self.render_placeholder(tool, cx).into_any_element(),
         }
@@ -424,6 +437,10 @@ impl Drop for WsShell {
             handle.stop();
             let _ = crate::tools::proxy::disable_system_proxy();
             let _ = crate::settings::set_proxy_running(false);
+        }
+        // 网关只听回环，退出掐掉即可（端口不占着，下次起得来）。
+        if let Some(relay) = self.airelay.running.take() {
+            relay.stop();
         }
     }
 }

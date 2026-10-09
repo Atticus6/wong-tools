@@ -360,3 +360,99 @@ app:
   hotkey_unavailable:
     en: System hotkeys unavailable
     zh-CN: 系统热键不可用
+  tool_airelay:
+    en: AI Relay
+    zh-CN: AI转发
+  tool_airelay_hint:
+    en: Zen free-model gateway
+    zh-CN: Zen 免费模型网关
+  airelay_start:
+    en: Start gateway
+    zh-CN: 启动网关
+  airelay_stop:
+    en: Stop
+    zh-CN: 停止
+  airelay_running:
+    en: Running
+    zh-CN: 运行中
+  airelay_stopped:
+    en: Stopped
+    zh-CN: 已停止
+  airelay_started:
+    en: Gateway started
+    zh-CN: 网关已启动
+  airelay_test:
+    en: Self-test
+    zh-CN: 连通自检
+  airelay_testing:
+    en: Testing…
+    zh-CN: 正在自检…
+  airelay_test_ok:
+    en: Gateway OK
+    zh-CN: 网关正常
+  airelay_port:
+    en: Port
+    zh-CN: 端口
+  airelay_port_hint:
+    en: Takes effect on next start
+    zh-CN: 改完点启动生效
+  airelay_models:
+    en: Models
+    zh-CN: 模型
+  airelay_live:
+    en: Live
+    zh-CN: 实时
+  airelay_fallback:
+    en: Fallback
+    zh-CN: 兜底
+  airelay_refresh:
+    en: Refresh catalog
+    zh-CN: 刷新目录
+  airelay_refreshing:
+    en: Refreshing…
+    zh-CN: 刷新目录中…
+  airelay_refreshed:
+    en: Catalog updated
+    zh-CN: 目录已更新
+  airelay_log:
+    en: Requests
+    zh-CN: 请求
+  airelay_col_time:
+    en: Time
+    zh-CN: 时间
+  airelay_col_route:
+    en: Route
+    zh-CN: 路由
+  airelay_col_model:
+    en: Model
+    zh-CN: 模型
+  airelay_col_tokens:
+    en: Tokens
+    zh-CN: Token
+  airelay_col_cache:
+    en: Cache
+    zh-CN: 缓存
+  airelay_col_finish:
+    en: Finish
+    zh-CN: 终局
+  airelay_col_ms:
+    en: Latency
+    zh-CN: 耗时
+  airelay_col_err:
+    en: Detail
+    zh-CN: 详情
+  airelay_egress_direct:
+    en: Direct
+    zh-CN: 直连
+  airelay_egress_proxy:
+    en: Via proxy
+    zh-CN: 代理
+  airelay_egress_blocked:
+    en: Blocked by rules
+    zh-CN: 规则拦截
+  airelay_tab_models:
+    en: Models
+    zh-CN: 模型
+  airelay_tab_reqs:
+    en: Requests
+    zh-CN: 请求

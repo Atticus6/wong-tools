@@ -46,6 +46,10 @@ const KEY_WINDOW_BOUNDS: &str = "window_bounds";
 const KEY_SELECTED_TOOL: &str = "selected_tool";
 /// 呼出搜索条的全局快捷键（`"Alt+Space"` 这种写法，见 `spotlight`）。
 const KEY_HOTKEY: &str = "hotkey";
+/// AI 转发网关端口（字符串存，非法回落默认）。
+const KEY_AIRELAY_PORT: &str = "airelay_port";
+/// AI 转发强制模型（空串 = 跟随客户端）。
+const KEY_AIRELAY_MODEL: &str = "airelay_model";
 
 /// 应用数据目录（平台相关，见模块文档）。
 pub fn data_dir() -> PathBuf {
@@ -138,6 +142,14 @@ async fn open(path: &Path) -> Result<libsql::Connection, String> {
     )
     .await
     .map_err(|e| format!("建规则表失败: {e}"))?;
+    // AI 转发请求日志：只追加不改，读按 id 保序，写时顺手裁到 100 条。
+    // 老库直接删库重建，不做列迁移（ALTER 一律不写）。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS airelay_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, route TEXT NOT NULL, model TEXT NOT NULL, finish TEXT NOT NULL, ms INTEGER NOT NULL, err TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_tokens INTEGER NOT NULL DEFAULT 0)",
+        (),
+    )
+    .await
+    .map_err(|e| format!("建请求表失败: {e}"))?;
     Ok(conn)
 }
 
@@ -544,6 +556,139 @@ pub fn set_hotkey(spec: &str) -> Result<(), String> {
     })
 }
 
+/// 读 AI 转发网关端口；没存过、非法、越界都回落默认（`DEFAULT_PORT` 在
+/// 工具侧，调用方传进来，设置层不认识具体工具）。
+pub fn airelay_port(default: u16) -> u16 {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_AIRELAY_PORT).await.ok()?
+    });
+    raw.and_then(|s| s.trim().parse::<u16>().ok()).filter(|p| *p > 0).unwrap_or(default)
+}
+
+/// 存 AI 转发网关端口（0 和非法值拒绝，调用方先验）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_airelay_port(port: u16) -> Result<(), String> {
+    if port == 0 {
+        return Err("端口不能是 0".to_string());
+    }
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_AIRELAY_PORT, &port.to_string()).await
+    })
+}
+
+/// 读 AI 转发强制模型；没存过或空串返回 `None`，
+/// 调用方（界面）默认第一张——永远强制改写，没有跟随模式。
+pub fn airelay_model() -> Option<String> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_AIRELAY_MODEL).await.ok()?
+    })?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// 存 AI 转发强制模型（界面永远有生效模型，空串理论上不进库）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_airelay_model(model: &str) -> Result<(), String> {
+    let value = model.trim().to_string();
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_AIRELAY_MODEL, &value).await
+    })
+}
+
+/// AI 转发单条请求记录（`airelay_requests` 一行）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredRequest {
+    /// 请求完成毫秒时间戳（界面转 HH:MM:SS）。
+    pub at_ms: u64,
+    /// `chat` / `responses` / `messages`。
+    pub route: String,
+    /// 实际模型（改写后记 `请求→实际`）。
+    pub model: String,
+    /// 终局：`stop` / `tool_calls` / `length` / `ERR`。
+    pub finish: String,
+    /// 整轮毫秒。
+    pub ms: u64,
+    /// 失败原因（成功为空）。
+    pub err: String,
+    /// 输入 token（不含缓存读）。
+    pub input_tokens: i64,
+    /// 输出 token。
+    pub output_tokens: i64,
+    /// 缓存命中 token。
+    pub cache_tokens: i64,
+}
+
+/// 写 AI 转发请求日志：追加一行，超 100 行裁掉最老的。
+/// 每轮请求调一次（低频），失败返回错误信息，调用方记一笔日志即可。
+pub fn log_airelay_request(entry: &StoredRequest) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        conn.execute(
+            "INSERT INTO airelay_requests (at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                libsql::Value::Integer(entry.at_ms as i64),
+                libsql::Value::Text(entry.route.clone()),
+                libsql::Value::Text(entry.model.clone()),
+                libsql::Value::Text(entry.finish.clone()),
+                libsql::Value::Integer(entry.ms as i64),
+                libsql::Value::Text(entry.err.clone()),
+                libsql::Value::Integer(entry.input_tokens),
+                libsql::Value::Integer(entry.output_tokens),
+                libsql::Value::Integer(entry.cache_tokens),
+            ],
+        )
+        .await
+        .map_err(|e| format!("写请求日志失败: {e}"))?;
+        conn.execute(
+            "DELETE FROM airelay_requests WHERE id NOT IN (SELECT id FROM airelay_requests ORDER BY id DESC LIMIT 100)",
+            (),
+        )
+        .await
+        .map_err(|e| format!("裁请求日志失败: {e}"))?;
+        Ok(())
+    })
+}
+
+/// 读 AI 转发请求日志：按 id 保序（老的在前），库坏了返回空（界面摆空表）。
+pub fn airelay_requests() -> Vec<StoredRequest> {
+    block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        let mut rows = conn
+            .query(
+                "SELECT at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens FROM airelay_requests ORDER BY id",
+                (),
+            )
+            .await
+            .ok()?;
+        let mut out = Vec::new();
+        loop {
+            let next = rows.next().await.ok()?;
+            let Some(row) = next else { break };
+            out.push(StoredRequest {
+                at_ms: row.get::<i64>(0).ok().unwrap_or(0).max(0) as u64,
+                route: row.get::<String>(1).ok().unwrap_or_default(),
+                model: row.get::<String>(2).ok().unwrap_or_default(),
+                finish: row.get::<String>(3).ok().unwrap_or_default(),
+                ms: row.get::<i64>(4).ok().unwrap_or(0).max(0) as u64,
+                err: row.get::<String>(5).ok().unwrap_or_default(),
+                input_tokens: row.get::<i64>(6).ok().unwrap_or(0).max(0),
+                output_tokens: row.get::<i64>(7).ok().unwrap_or(0).max(0),
+                cache_tokens: row.get::<i64>(8).ok().unwrap_or(0).max(0),
+            });
+        }
+        Some(out)
+    })
+    .unwrap_or_default()
+}
+
 /// 测试隔离器：把设置库指向临时文件，drop 时还原指向并删除临时文件。
 /// 必须在 `i18n::lock_locale()` 之后使用（和改 locale 的测试同串行）。
 #[cfg(test)]
@@ -905,5 +1050,33 @@ mod tests {
         assert_eq!(hotkey(), None, "没存过读 None");
         set_hotkey("Alt+Space").expect("能写快捷键");
         assert_eq!(hotkey().as_deref(), Some("Alt+Space"), "原文往返一致");
+    }
+
+    #[test]
+    fn airelay_port_roundtrip_with_fallback() {
+        // 端口走公共 API 往返：空库读默认，写完读回一致；非法值回落默认。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("airelay-port");
+        use super::airelay_port;
+        use super::set_airelay_port;
+        assert_eq!(airelay_port(11459), 11459, "没存过读默认");
+        set_airelay_port(11459).expect("能写端口");
+        assert_eq!(airelay_port(18080), 11459, "写完读回一致");
+        assert!(set_airelay_port(0).is_err(), "0 端口拒绝入库");
+    }
+
+    #[test]
+    fn airelay_model_roundtrip() {
+        // 强制模型走公共 API 往返：空库读 None，写完读回一致；
+        // 空串写回去也是 None（界面层默认第一张）。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("airelay-model");
+        use super::airelay_model;
+        use super::set_airelay_model;
+        assert_eq!(airelay_model(), None, "没存过是跟随");
+        set_airelay_model("mimo-v2.6-flash-free").expect("能写模型");
+        assert_eq!(airelay_model().as_deref(), Some("mimo-v2.6-flash-free"));
+        set_airelay_model("  ").expect("空串能写");
+        assert_eq!(airelay_model(), None, "空串是跟随");
     }
 }
