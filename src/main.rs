@@ -1,7 +1,7 @@
-//! Wong Tools bootstrap: fonts, theme, window.
+//! Wong Tools 启动：字体、主题、窗口。
 //!
-//! Release builds are GUI apps: no console window when launched from Explorer
-//! (debug builds keep the console for `cargo run` diagnostics).
+//! release 构建是纯 GUI 程序：从资源管理器启动时不带黑窗口
+//!（debug 构建保留控制台，方便看 `cargo run` 的诊断输出）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -12,8 +12,8 @@ use std::borrow::Cow;
 
 use gpui_kit::*;
 
-/// Bundled Geist + Geist Mono (SIL OFL, see assets/fonts/); registered
-/// before the first frame so the theme's font faces resolve.
+/// 内置 Geist + Geist Mono（SIL OFL 协议，见 assets/fonts/）；首帧前注册，
+/// 主题里的字体才能解析出来。
 fn load_fonts(cx: &mut App) {
     cx.text_system()
         .add_fonts(vec![
@@ -26,9 +26,8 @@ fn load_fonts(cx: &mut App) {
         .expect("failed to load bundled Geist fonts");
 }
 
-/// Spur-style window: hidden OS caption with a custom-drawn title bar. On
-/// Windows the platform keeps the resize frame and answers the control-area
-/// hit tests (drag, snap layouts, double-click zoom) natively.
+/// Spur 风格窗口：藏掉系统标题栏，自己画。Windows 上平台保留缩放边框，
+/// 拖拽区命中测试（拖拽、Snap Layouts、双击缩放）仍由系统原生接管。
 fn window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
@@ -46,8 +45,8 @@ fn window_options() -> WindowOptions {
 }
 
 fn main() {
-    // The full icon catalog: the default `Assets` bundle only embeds a small
-    // subset, so use AllAssets for the sidebar and title bar icons.
+    // 完整图标集：默认 `Assets` 只内嵌了一小部分，侧边栏和标题栏的图标
+    // 需要 AllAssets 才找得到。
     let app = application().with_assets(assets::AllAssets);
     app.run(|cx| {
         init(cx);
@@ -63,31 +62,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    // NOTE: do NOT `use super::*` here — it would pull gpui's own `#[test]`
-    // macro into scope and shadow the built-in test attribute. Import only
-    // what the tests need.
+    // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
+    // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::window_options;
     use gpui_kit::px;
 
     #[test]
     fn window_uses_transparent_titlebar_and_sane_bounds() {
-        // The shell draws its own 38px title bar, so the OS caption must
-        // stay hidden; a regression here would show two title bars.
+        // 外壳自己画了 38px 标题栏，系统标题栏必须藏掉；
+        // 这里回退了就会看到两个标题栏。
         let opts = window_options();
-        let titlebar = opts.titlebar.expect("custom titlebar options");
+        let titlebar = opts.titlebar.expect("需要自绘标题栏参数");
         assert!(
             titlebar.appears_transparent,
-            "OS caption must be hidden for the custom title bar"
+            "系统标题栏必须隐藏，自绘标题栏才生效"
         );
         assert_eq!(
             titlebar.title.as_deref(),
             Some("Wong Tools"),
-            "window title drifted"
+            "窗口标题被改动了"
         );
-        let min = opts.window_min_size.expect("minimum window size");
+        let min = opts.window_min_size.expect("需要最小窗口尺寸");
         assert!(
             min.width >= px(800.) && min.height >= px(500.),
-            "minimum size too small for title bar + sidebar: {min:?}"
+            "最小尺寸太小，装不下标题栏 + 侧边栏：{min:?}"
         );
     }
 }

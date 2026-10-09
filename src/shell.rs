@@ -1,25 +1,25 @@
-//! App shell: Spur-style custom title bar, sidebar tool navigation,
-//! and a content area. Tools are placeholders; each gets its own view later.
+//! 应用外壳：Spur 风格自绘标题栏、侧边工具导航、内容区。
+//! 工具目前是占位项，以后每个真工具配独立视图。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::*;
 
-/// Spur metric tokens.
+/// Spur 度量 token。
 const TITLEBAR_H: f32 = 38.0;
 const HEADER_H: f32 = 44.0;
-/// Native Windows caption button width (the system metric).
+/// 原生 Windows 标题栏按钮宽度（系统度量）。
 const CAPTION_W: f32 = 46.0;
 const SIDEBAR_W: f32 = 216.0;
 
-/// The one small type scale (logical px).
+/// 唯一的小字号阶梯（逻辑像素）。
 const TEXT_SM: f32 = 12.0;
 const TEXT_MD: f32 = 13.0;
 const TEXT_LG: f32 = 15.0;
 
-/// One sidebar entry. Real tools replace the placeholder `hint` with
-/// their own view; the entry itself stays a name + icon + hint triple.
+/// 一条侧边栏入口。真工具会把占位 `hint` 换成自己的视图；
+/// 入口本身永远是名称 + 图标 + 提示三件套。
 struct ToolDef {
     name: &'static str,
     hint: &'static str,
@@ -49,14 +49,14 @@ const TOOLS: &[ToolDef] = &[
     },
 ];
 
-/// Root view of the main window: owns the selected tool index.
+/// 主窗口根视图：持有当前选中的工具序号。
 pub struct WsShell {
     selected: usize,
 }
 
 impl WsShell {
-    /// Create the shell. `window` is unused for now; later tools (dialogs,
-    /// toasts) will need it at construction time.
+    /// 创建外壳。`window` 暂时用不到；以后的工具（对话框、
+    /// 通知）会在构造时需要它，先把参数占上。
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self { selected: 0 }
     }
@@ -78,7 +78,7 @@ impl WsShell {
             .bg(title_bg)
             .border_b_1()
             .border_color(title_border)
-            // Brand monogram + wordmark; part of the drag surface.
+            // 品牌 monogram + 字标，属于拖拽区的一部分。
             .child(
                 div()
                     .flex_none()
@@ -107,7 +107,7 @@ impl WsShell {
                             .child("Wong Tools"),
                     ),
             )
-            // Flexible drag area between brand and caption controls.
+            // 品牌和标题栏按钮之间的弹性拖拽区。
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
             .child(
                 Button::new("new-tool")
@@ -243,10 +243,10 @@ impl Render for WsShell {
     }
 }
 
-/// Minimize / maximize-restore / close, flush right in the title bar.
+/// 最小化 / 最大化-还原 / 关闭，贴在标题栏右侧。
 ///
-/// Each button is a platform control area: the OS answers the hit test and
-/// owns the behavior, including Snap Layouts and the close action.
+/// 每个按钮都是平台控制区：由操作系统接管命中测试和行为，
+/// 包括 Snap Layouts 和关闭动作。
 fn caption_controls(window: &Window, muted: Hsla, fg: Hsla) -> Vec<AnyElement> {
     let max_icon = if window.is_maximized() {
         IconName::WindowRestore
@@ -260,8 +260,7 @@ fn caption_controls(window: &Window, muted: Hsla, fg: Hsla) -> Vec<AnyElement> {
     ]
     .into_iter()
     .map(|(id, icon, area, close)| {
-        // Native hover behavior: a white wash for min/max, the system red
-        // for close.
+        // 原生 hover 行为：最小化/最大化用白色 wash，关闭用系统红。
         let hover_bg: Hsla = if close {
             rgb(0xe81123).into()
         } else {
@@ -294,23 +293,21 @@ fn caption_controls(window: &Window, muted: Hsla, fg: Hsla) -> Vec<AnyElement> {
 
 #[cfg(test)]
 mod tests {
-    // NOTE: do NOT `use super::*` here — it would pull gpui's own `#[test]`
-    // macro into scope and shadow the built-in test attribute. Import only
-    // what the tests need.
+    // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
+    // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::TOOLS;
 
     #[test]
     fn sidebar_tools_are_registered_without_duplicates() {
-        // The sidebar renders one row per entry; an empty or duplicated
-        // table would show a broken navigation.
-        assert!(!TOOLS.is_empty(), "TOOLS needs at least one entry");
+        // 侧边栏按表渲染，一行一项；表空了或重名导航就坏了。
+        assert!(!TOOLS.is_empty(), "TOOLS 至少要有一项");
         let mut names = Vec::new();
         for tool in TOOLS {
-            assert!(!tool.name.is_empty(), "tool name must not be empty");
-            assert!(!tool.hint.is_empty(), "tool hint must not be empty");
+            assert!(!tool.name.is_empty(), "工具名不能为空");
+            assert!(!tool.hint.is_empty(), "工具提示不能为空");
             assert!(
                 !names.contains(&tool.name),
-                "duplicate sidebar entry {}",
+                "侧边栏入口重名 {}",
                 tool.name
             );
             names.push(tool.name);
