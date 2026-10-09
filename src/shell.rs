@@ -132,6 +132,7 @@ impl WsShell {
                         div()
                             .text_size(px(TEXT_MD))
                             .text_color(fg)
+                            // “Wong Tools”
                             .child(tx.app_name.as_str()),
                     ),
             )
@@ -139,6 +140,7 @@ impl WsShell {
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
             .child(
                 Button::new("new-tool")
+                    // “新建”
                     .label(tx.new_tool.as_str())
                     .small()
                     .outline()
@@ -199,6 +201,7 @@ impl WsShell {
                         cx.notify();
                     }))
                     .child(Icon::new(tool.icon.clone()).size(px(14.)))
+                    // 行标签：工具名，中文见 i18n/zh.json（如“欢迎”）。
                     .child(div().text_size(px(TEXT_MD)).child(tool.id.name(t())))
             }))
     }
@@ -246,6 +249,7 @@ impl WsShell {
                         div()
                             .text_size(px(TEXT_MD))
                             .text_color(muted)
+                            // “功能即将到来，敬请期待”
                             .child(tx.coming_soon.as_str()),
                     ),
             )

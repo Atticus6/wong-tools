@@ -32,6 +32,7 @@ fn load_fonts(cx: &mut App) {
 fn window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
+            // “Wong Tools”
             title: Some(crate::i18n::t().window_title.as_str().into()),
             appears_transparent: true,
             traffic_light_position: None,

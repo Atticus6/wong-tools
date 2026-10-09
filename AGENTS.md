@@ -54,6 +54,9 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   用户可见文案中文优先。
 - 所有用户可见文案必须走 `crate::i18n::t()`，禁止在视图里硬编码。
   默认中文，`WONG_LANG=en` 切英文；加文案先加 `Strings` 字段。
+- 引用文案时在上面加中文注释，注明中文原文（如 `// “新建”`），
+  不翻 JSON 就知道界面写的是什么。按 id 查表的动态文案，在
+  `ToolId::name/hint` 的文档里举例即可。
 - 文案住在 `i18n/*.json`（编译时打进二进制）。加语言：加 JSON 文件 +
   `Language` 分支 + `LANGUAGES` 登记；加文案：JSON 和 `Strings` 两边
   同时加字段。`deny_unknown_fields` 会拦住僵尸 key。
