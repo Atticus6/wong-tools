@@ -1145,9 +1145,14 @@ pub fn parse_socks5_request(req: &[u8]) -> Result<Target, String> {
     }
 }
 
+// 以下四项拼的是 Windows `reg` / wininet 专属字符串：生产构建只在
+// Windows 要（调用方被 cfg 裁掉），但纯逻辑单测跨平台验格式也要，所以
+// 测试构建下全平台编译。直接 `#[cfg(windows)]` 会把 mac 的单测一起裁掉。
+#[cfg(any(windows, test))]
 /// 注册表位置：HKCU 互联网设置，改它就是改系统代理，不用管理员权限。
 const INET_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
+#[cfg(any(windows, test))]
 /// `reg add` 改 DWORD 的参数：调用方直接喂给 `reg` 命令。
 pub fn reg_set_dword_args(name: &str, value: u32) -> Vec<String> {
     vec![
@@ -1163,6 +1168,7 @@ pub fn reg_set_dword_args(name: &str, value: u32) -> Vec<String> {
     ]
 }
 
+#[cfg(any(windows, test))]
 /// `reg add` 改字符串的参数：调用方直接喂给 `reg` 命令。
 pub fn reg_set_string_args(name: &str, value: &str) -> Vec<String> {
     vec![
@@ -1178,6 +1184,7 @@ pub fn reg_set_string_args(name: &str, value: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(any(windows, test))]
 /// 通知运行中的程序重读代理设置：先发“变了”(39)再发“刷新”(37)，
 /// 少一个浏览器就不跟，这是 Windows 改系统代理后的标准收尾。
 pub fn internet_refresh_script() -> String {

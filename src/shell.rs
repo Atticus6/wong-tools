@@ -134,13 +134,20 @@ impl WsShell {
         let title_bg = cx.theme().title_bar;
         let title_border = cx.theme().title_bar_border;
         let muted = cx.theme().muted_foreground;
+        // macOS 红绿灯占左上约 60px：标题栏左边多让位，品牌往右挪不被盖住；
+        // Windows 右侧是自绘最小化/最大化/关闭，本来就贴边，不留白。
+        // `cfg!` 运行时分支：函数引用还在，跨平台编译不报 dead_code。
+        let is_mac = cfg!(target_os = "macos");
+        let left_pad = if is_mac { 72. } else { 12. };
+        let right_pad = if is_mac { 12. } else { 0. };
 
         div()
             .flex()
             .flex_none()
             .items_center()
             .h(px(TITLEBAR_H))
-            .pl(px(12.))
+            .pl(px(left_pad))
+            .pr(px(right_pad))
             .gap(px(4.))
             .bg(title_bg)
             .border_b_1()
@@ -186,8 +193,18 @@ impl WsShell {
                     .cursor_pointer()
                     .on_click(|_, _, _| println!("New tool (not implemented yet)")),
             )
-            .child(div().w(px(8.)))
-            .children(caption_controls(window, muted, fg))
+            // macOS 用系统红绿灯（左上），右侧不画 Windows 按钮；
+            // Windows 才要 8px 间隔 + 三个贴边按钮。
+            .children(if is_mac {
+                Vec::new()
+            } else {
+                vec![div().w(px(8.)).into_any_element()]
+            })
+            .children(if is_mac {
+                Vec::new()
+            } else {
+                caption_controls(window, muted, fg)
+            })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
