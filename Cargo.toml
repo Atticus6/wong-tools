@@ -1,0 +1,21 @@
+[package]
+name = "wong-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui-kit = "0.7.1"
+serde_json = "1"
+
+# gpui-kit 官方文档推荐：只优化框架依赖的 Debug 运行时性能，
+# 应用自身仍保持 Debug，详见 https://gpui-kit.com/docs/installation
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
