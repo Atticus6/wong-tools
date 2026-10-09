@@ -1,0 +1,56 @@
+_version: 2
+app:
+  app_name:
+    en: Wong Tools
+    zh-CN: Wong Tools
+  window_title:
+    en: Wong Tools
+    zh-CN: Wong Tools
+  new_tool:
+    en: New
+    zh-CN: 新建
+  tool_welcome:
+    en: Welcome
+    zh-CN: 欢迎
+  tool_welcome_hint:
+    en: Toolbox home
+    zh-CN: 工具箱首页
+  tool_text:
+    en: Text Tools
+    zh-CN: 文本工具
+  tool_text_hint:
+    en: Coming soon
+    zh-CN: 敬请期待
+  tool_convert:
+    en: Format Converter
+    zh-CN: 格式转换
+  tool_convert_hint:
+    en: Coming soon
+    zh-CN: 敬请期待
+  tool_settings:
+    en: Settings
+    zh-CN: 设置
+  tool_settings_hint:
+    en: Themes & preferences
+    zh-CN: 主题与偏好
+  coming_soon:
+    en: This feature is coming soon
+    zh-CN: 功能即将到来，敬请期待
+  settings_language:
+    en: Language
+    zh-CN: 语言
+  settings_language_hint:
+    en: Applies immediately; title bar updates on restart
+    zh-CN: 立即生效，标题栏下次启动更新
+  settings_lang_zh:
+    en: 中文
+    zh-CN: 中文
+  settings_lang_en:
+    en: English
+    zh-CN: English
+  settings_theme:
+    en: Theme
+    zh-CN: 主题
+  settings_theme_hint:
+    en: Click to apply immediately
+    zh-CN: 点击切换，立即生效

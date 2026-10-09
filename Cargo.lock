@@ -8404,7 +8404,7 @@ name = "wong-tools"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
- "serde",
+ "rust-i18n",
  "serde_json",
 ]
 

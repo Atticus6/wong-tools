@@ -5,6 +5,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// 应用文案：`locales/ui.yml` 的 `app.*`，默认中文。组件内置文案走
+// 组件自己的 locale，`extend!` 负责把两边接起来（见 run 里的注册）。
+rust_i18n::i18n!("locales", fallback = "zh-CN");
+
 mod i18n;
 mod shell;
 mod theme;
@@ -33,7 +37,7 @@ fn window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
             // “Wong Tools”
-            title: Some(crate::i18n::t().window_title.as_str().into()),
+            title: Some(crate::i18n::t("app.window_title").into()),
             appears_transparent: true,
             traffic_light_position: None,
         }),
@@ -51,9 +55,13 @@ fn main() {
     // 需要 AllAssets 才找得到。
     let app = application().with_assets(assets::AllAssets);
     app.run(|cx| {
+        // 把应用文案并入组件：只调一次，必须在 `init` 之前。
+        use gpui_kit::component as gpui_component;
+        rust_i18n::extend!(gpui_component);
         init(cx);
         load_fonts(cx);
         theme::init(cx);
+        crate::i18n::init();
 
         open_window(window_options(), cx, |window, cx| {
             cx.new(|cx| shell::WsShell::new(window, cx))

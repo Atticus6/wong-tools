@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 gpui-kit = "0.7.1"
-serde = { version = "1", features = ["derive"] }
+rust-i18n = "4.2"
 serde_json = "1"
 
 # gpui-kit 官方文档推荐：只优化框架依赖的 Debug 运行时性能，

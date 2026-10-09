@@ -22,7 +22,8 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   → `open_window`。不写任何 UI 代码。
 - `src/shell.rs`——`WsShell`：38px 自绘标题栏（品牌 + 拖拽区 + 经
   `WindowControlArea` 接管的原生标题栏按钮）+ 216px 侧边导航 +
-  内容区。工具目前只是 `TOOLS` 里的占位项，以后每个真工具配独立视图。
+  内容区。工具目前只是 `TOOLS` 里的占位项，以后每个真工具配独立视图；
+  设置页是第一个真交互（语言 / 主题切换），选中态暂存 `WsShell`。
 - `src/theme.rs`——用 `include_str!` 解析 `themes/wong.json`
   （`ThemeSet`），再经
   `Theme::global_mut(cx).apply_config(&Rc::new(config))` 应用 `Wong Dark`。
@@ -52,14 +53,22 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - 注释写“为什么”，不复述代码在“做什么”。自解释的代码不加废话注释。
 - 注释一律使用中文（`//!`、`///`、`//` 都是）。代码标识符保持英文；
   用户可见文案中文优先。
-- 所有用户可见文案必须走 `crate::i18n::t()`，禁止在视图里硬编码。
-  默认中文，`WONG_LANG=en` 切英文；加文案先加 `Strings` 字段。
+- 所有用户可见文案必须走 `crate::i18n::t("app.xxx")`，禁止在视图里硬编码。
+  默认中文，`WONG_LANG=en` 切英文。
 - 引用文案时在上面加中文注释，注明中文原文（如 `// “新建”`），
-  不翻 JSON 就知道界面写的是什么。按 id 查表的动态文案，在
-  `ToolId::name/hint` 的文档里举例即可。
-- 文案住在 `i18n/*.json`（编译时打进二进制）。加语言：加 JSON 文件 +
-  `Language` 分支 + `LANGUAGES` 登记；加文案：JSON 和 `Strings` 两边
-  同时加字段。`deny_unknown_fields` 会拦住僵尸 key。
+  不翻 yml 就知道界面写的是什么。`ToolId::name/hint` 内部按 key 查表，
+  每个分支自带原文注释。
+- 文案住在 `locales/ui.yml`（`app.*` 命名空间，官方 rust-i18n 流程，
+  详见 https://gpui-kit.com/docs/i18n）。加语言：加 locale 列 +
+  `Language` 分支 + `LANGUAGES` 登记；加文案：两列同时加，并在
+  `i18n::tests::KEYS` 登记。组件内置文案应用侧查不到，缺 key 时
+  `t()` 返回 key 本身。
+- `extend!(gpui_component)` 在启动时只调一次，且必须在 `gpui_kit::init`
+  之前。语言切换走 `component::set_locale`（经 `i18n::set_language`）。
+- 改全局 locale 的测试必须拿 `i18n::lock_locale()` 串行，否则并行跑
+  互相覆盖。
+- 语言运行时可切（`set_language` + `cx.notify()` 即时重绘），窗口标题
+  等窗口级文字需重启生效；主题用 `theme::apply` 即时切换并重绘所有窗口。
 - 每个 `.rs` 文件首行必须有 `//!` 模块文档，说明职责与归属。
 - 所有 `pub` 项必须有 `///` 文档注释；魔法数字必须命名为常量并注明
   来源（如 `CAPTION_W = 46.0` 是 Windows 原生标题栏按钮宽度）。
