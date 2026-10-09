@@ -36,6 +36,15 @@ impl WsShell {
                 self.theme_rows(cx),
                 cx,
             ))
+            // “快捷键”分组
+            .child(self.settings_section(
+                // “呼出快捷键”
+                t("app.settings_hotkey"),
+                // “全局生效，点修改后直接按下组合键”
+                t("app.settings_hotkey_hint"),
+                self.hotkey_rows(cx),
+                cx,
+            ))
     }
 
     /// 设置页的一组：标题 + 副提示 + 若干选项行。
@@ -137,6 +146,103 @@ impl WsShell {
                 )
             })
             .collect()
+    }
+
+    /// “快捷键”分组：当前组合 + 修改/恢复默认，失败原因另起一行。
+    /// 录制时整行挂 `capture_key_down`（按钮点完焦点还在行内，按键冒泡
+    /// 前先到）；切走页面录制态由 `select_tool` 顺手清掉。
+    fn hotkey_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use gpui_kit::component::button::Button;
+        use gpui_kit::component::Sizable as _;
+
+        let fg = cx.theme().foreground;
+        let red = cx.theme().red;
+        let mut row = div()
+            .id("hotkey-row")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .px(px(10.))
+            .h(px(32.))
+            .rounded(px(6.));
+        if self.spotlight.recording {
+            // 录制态：提示语 + 按键捕获（`WeakEntity::update` 写回主窗口，
+            // overlay 同款）。
+            let weak = cx.entity().downgrade();
+            row = row
+                .capture_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
+                    let stroke = event.keystroke.clone();
+                    let _ = weak.update(cx, |this, cx| {
+                        this.record_hotkey(&stroke, cx);
+                    });
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(TEXT_MD))
+                        .text_color(fg)
+                        // “按下快捷键…，Esc 取消”
+                        .child(t("app.hotkey_recording")),
+                );
+        } else {
+            row = row
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(TEXT_MD))
+                        .text_color(fg)
+                        .child(crate::spotlight::display_hotkey(&self.spotlight.spec)),
+                )
+                .child(
+                    Button::new("hotkey-change")
+                        // “修改”
+                        .label(t("app.hotkey_change"))
+                        .small()
+                        .outline()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.spotlight.recording = true;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("hotkey-reset")
+                        // “恢复默认”
+                        .label(t("app.hotkey_reset"))
+                        .small()
+                        .outline()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            match this
+                                .spotlight
+                                .rebind_hotkey(crate::spotlight::DEFAULT_HOTKEY)
+                            {
+                                Ok(keymap) => {
+                                    cx.bind_keys([KeyBinding::new(
+                                        &keymap,
+                                        crate::spotlight::ToggleSpotlight,
+                                        None,
+                                    )]);
+                                }
+                                Err(e) => this.spotlight.hotkey_error = Some(e),
+                            }
+                            cx.notify();
+                        })),
+                );
+        }
+        let mut rows = vec![row.into_any_element()];
+        if let Some(error) = &self.spotlight.hotkey_error {
+            rows.push(
+                div()
+                    .text_size(px(TEXT_SM))
+                    .text_color(red)
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        // 注册失败也不藏：用户切走再回来还能看到原因。
+        rows
     }
 
     /// “主题”分组：全部内置主题，一行一个，中文名见 themes/wong.json。

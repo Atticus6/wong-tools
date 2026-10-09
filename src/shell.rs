@@ -103,13 +103,55 @@ const TOOLS: &[ToolDef] = &[
     },
 ];
 
+/// 聚光搜索用的工具入口：序号 + 名称 + 英文检索词。
+/// 和 `TOOLS` 同源，顺序一致，加新工具时关键字一起补。
+pub(crate) struct ToolEntry {
+    /// 在 `TOOLS` 里的序号，也是选中态的值。
+    pub index: usize,
+    /// 工具名（走文案）。
+    pub name: String,
+    /// 英文检索词（搜 `proxy` 直达代理）。
+    pub keywords: &'static str,
+}
+
+/// 侧边栏顺序的工具入口（聚光搜索跳转命令用）。
+pub(crate) fn tool_entries() -> Vec<ToolEntry> {
+    const KEYWORDS: &[&str] = &[
+        // 欢迎 / 截图 / 代理 / 文本工具 / 格式转换 / 设置
+        "welcome home start",
+        "screenshot capture printscreen",
+        "proxy vless vpn tunnel",
+        "text tools",
+        "convert format transform",
+        "settings preferences hotkey",
+    ];
+    TOOLS
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| ToolEntry {
+            index,
+            name: tool.id.name(),
+            keywords: KEYWORDS.get(index).copied().unwrap_or(""),
+        })
+        .collect()
+}
+
+/// 设置工具在 `TOOLS` 里的序号（聚光搜索“改快捷键”跳转用）。
+pub(crate) fn settings_tool_index() -> usize {
+    TOOLS
+        .iter()
+        .position(|tool| tool.id == ToolId::Settings)
+        .unwrap_or(0)
+}
+
 /// 主窗口根视图：持有当前选中的工具序号，以及设置页选中的主题名
 /// （主题本体的应用走 `crate::theme`，这里只记选中态用来高亮）。
 pub struct WsShell {
-    selected: usize,
+    pub(crate) selected: usize,
     pub(crate) settings_theme: String,
     pub(crate) shot: crate::tools::screenshot::ShotState,
     pub(crate) proxy: crate::tools::proxy::ProxyView,
+    pub(crate) spotlight: crate::spotlight::SpotlightView,
 }
 
 impl WsShell {
@@ -124,6 +166,17 @@ impl WsShell {
             settings_theme: crate::theme::selected(),
             shot: crate::tools::screenshot::ShotState::empty(),
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
+            spotlight: crate::spotlight::SpotlightView::new(cx),
+        }
+    }
+
+    /// 侧边栏选中并持久化：导航点击和搜索面板跳转共用，行为一致。
+    /// 切工具顺手退出快捷键录制（录制行不在了还记着会误事）。
+    pub(crate) fn select_tool(&mut self, ix: usize) {
+        self.selected = ix;
+        self.spotlight.recording = false;
+        if let Err(e) = crate::settings::set_selected_tool(ix) {
+            eprintln!("存选中工具失败: {e}");
         }
     }
 
@@ -256,11 +309,7 @@ impl WsShell {
                         }
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected = ix;
-                        // 点即存：下次打开回到这一页，崩了也不丢。
-                        if let Err(e) = crate::settings::set_selected_tool(ix) {
-                            eprintln!("存选中工具失败: {e}");
-                        }
+                        this.select_tool(ix);
                         cx.notify();
                     }))
                     .child(Icon::new(tool.icon.clone()).size(px(14.)))
@@ -348,6 +397,13 @@ impl Render for WsShell {
             .size_full()
             .bg(bg)
             .text_color(fg)
+            // 全局呼出开关：`None` 上下文，焦点在哪都能触发；
+            // 和系统级热键走同一个 `toggle_palette_window`，不双跳。
+            .on_action(cx.listener(
+                |this, _: &crate::spotlight::ToggleSpotlight, _, cx| {
+                    this.spotlight.toggle_palette_window(cx);
+                },
+            ))
             .child(self.render_titlebar(window, cx))
             .child(
                 div()

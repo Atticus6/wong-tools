@@ -30,6 +30,17 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   不直接钻 `view`）。加新工具：在此建文件夹 + `TOOLS` 登记 +
   文案两列 + `KEYS` 登记，视图另起 `view.rs`（`impl WsShell`，
   字段/方法走 `pub(crate)`）。
+- `src/spotlight/`——聚光搜索（独立 PopUp 面板窗口，不是侧边栏工具，
+  所以不进 `tools/`，也不是主窗口里的悬浮层）：`mod.rs`（命令表/过滤/
+  快捷键解析/`HotkeyHandle`）+ `view.rs`（主窗侧 `SpotlightView`
+  开关 + 面板窗 `PaletteView`）。多窗口做法见官方 multi-window 文档：
+  每窗独立 `Root`，面板执行命令回主窗口（`WeakEntity<WsShell>`），
+  跑完自关并把应用提到前台；关窗策略是全关才退。面板窗 mac 红绿灯用
+  越界位置藏掉（框架没隐藏开关，升级时复查）。面板只认 Esc/执行/开关，
+  点窗外不关。
+  全局键走 `global-hotkey`（后台也能收），应用内走官方 keybinding（`bind_keys` + Action +
+  `on_action`，`None` 上下文后来居上）；两边调同一个开关，系统键会把
+  事件吃掉，不双跳。按键录制用 `capture_key_down` 读 `Keystroke` 现拼原文。
 - `src/shell.rs`——只剩框架：`WsShell`（字段 `pub(crate)`）、`TOOLS`、
   标题栏/侧边栏/分发、`Drop` 兜底。工具视图和设置页视图不在这。
 - `src/tools/screenshot/mod.rs`——纯逻辑，不碰 GPUI：xcap 截主显示器

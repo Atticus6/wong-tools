@@ -12,6 +12,7 @@ rust_i18n::i18n!("locales", fallback = "zh-CN");
 mod i18n;
 mod settings;
 mod shell;
+mod spotlight;
 mod theme;
 mod tools;
 
@@ -178,6 +179,45 @@ fn main() {
         // 上次非正常退出可能留下系统代理指向已死的隧道：先清掉再开窗，
         // 不然用户一启动就断网，还以为是新 bug。
         cleanup_owned_proxy();
+
+        // 快捷键：组件默认在 `init` 里注册，应用的后加。
+        // 官方文档做法（https://gpui-kit.com/docs/keybinding/ ）：
+        // `None` 上下文 + 后加 = 同深度后来居上，面板没打开时没有
+        // handler，不消费其他输入，原样落到组件默认行为。
+        {
+            use crate::spotlight::{
+                PaletteConfirm, PaletteDismiss, PaletteDown, PaletteUp, ToggleSpotlight,
+            };
+            let mut bindings = vec![
+                KeyBinding::new("up", PaletteUp, None),
+                KeyBinding::new("down", PaletteDown, None),
+                KeyBinding::new("enter", PaletteConfirm, None),
+                KeyBinding::new("escape", PaletteDismiss, None),
+            ];
+            // 呼出键走用户存档：没存过回落默认，非法就跳过绑定
+            // （设置页会展示原因）。`KeyBinding::new` 非法会 panic，
+            // 先验（`keymap_binding_string`）后建。
+            let spec = crate::settings::hotkey()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| crate::spotlight::DEFAULT_HOTKEY.to_string());
+            match crate::spotlight::keymap_binding_string(&spec) {
+                Ok(keymap) => {
+                    bindings.push(KeyBinding::new(&keymap, ToggleSpotlight, None));
+                }
+                Err(e) => eprintln!("呼出快捷键无效，跳过应用内绑定: {e}"),
+            }
+            cx.bind_keys(bindings);
+        }
+
+        // 关窗策略：所有窗口都没了才退出（官方多窗口做法，
+        // https://gpui-kit.com/docs/multi-window/ ）。
+        // 面板窗和主窗谁先关都不影响另一个，全关了才退。
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
         // 正常退出也要清系统代理 + 存窗口位置：Drop 不一定跑（被杀更不会），
         // 钩子兜底。detach 让钩子活到进程结束，不然闭包结束就注销了。

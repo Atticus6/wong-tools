@@ -1695,6 +1695,121 @@ impl WsShell {
             )
     }
 
+    /// 停止隧道：掐监听线程 + 关系统代理 + 清活表落旗。
+    /// 开关按钮和搜索面板共用，行为一致。
+    pub(crate) fn proxy_tunnel_stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.proxy.running.take() {
+            handle.stop();
+        }
+        // 搜索面板的启停行看这个缓存（开面板时同步读，渲染里不再碰主窗口）。
+        self.spotlight.proxy_running = false;
+        // 活表一起扔：下次启动建新的，旧快照不复活。
+        self.proxy.live = None;
+        match crate::tools::proxy::disable_system_proxy() {
+            // “已断开”
+            Ok(()) => {
+                if let Err(e) = crate::settings::set_proxy_running(false) {
+                    eprintln!("落隧道旗失败: {e}");
+                }
+                self.proxy.status = Some(t("app.proxy_stopped"))
+            }
+            Err(e) => self.proxy.status = Some(e),
+        }
+        cx.notify();
+    }
+
+    /// 启动隧道：建活分流表 + 占端口 + 开系统代理 + 起连接心跳。
+    /// 开关按钮和搜索面板共用，行为一致。
+    pub(crate) fn proxy_tunnel_start(&mut self, cx: &mut Context<Self>) {
+        if self.proxy_occupied() {
+            return;
+        }
+        if self.proxy.subscription.nodes.is_empty() {
+            // “先更新订阅并选择节点”
+            self.proxy.status = Some(t("app.proxy_need_nodes"));
+            cx.notify();
+            return;
+        };
+        // 活分流表在点击瞬间建好：建索引（8 万条后缀排序）
+        // 加占端口，几十毫秒，按钮上点一下无感。
+        // 之后改选择直接换表里的内容，新连接即用，
+        // 已建连的手里是旧快照，不受影响。
+        let live = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::tools::proxy::RoutingTable::build(
+                self.proxy.subscription.clone(),
+                &self.proxy.manual_rules,
+                self.proxy.selections.clone(),
+                self.proxy.latencies.clone(),
+            ),
+        ));
+        // 连接表和活分流表一起建：表是活的（一直记）。
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::proxy::ConnRegistry::default(),
+        ));
+        // 先占端口再开系统代理：端口被占直接报错，不动系统设置。
+        match crate::tools::proxy::start_proxy(
+            live.clone(),
+            registry.clone(),
+            crate::tools::proxy::MIXED_PORT,
+        ) {
+            Ok(handle) => {
+                match crate::tools::proxy::enable_system_proxy(crate::tools::proxy::MIXED_PORT)
+                {
+                    Ok(()) => {
+                        // 隧道旗举起来：崩了/被杀了下次启动能认出来收尾。
+                        if let Err(e) = crate::settings::set_proxy_running(true) {
+                            eprintln!("存隧道旗失败: {e}");
+                        }
+                        self.proxy.running = Some(handle);
+                        self.proxy.conns = Some(registry);
+                        self.proxy.live = Some(live);
+                        // 搜索面板的启停行看这个缓存（开面板时同步读）。
+                        self.spotlight.proxy_running = true;
+                        // 连接表心跳：1 秒刷一次速度和时间，开着才跳，
+                        // 停了自己退（running 没了就 break）。
+                        cx.spawn(async move |this, cx| {
+                            loop {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(1))
+                                    .await;
+                                let alive = cx
+                                    .update(|cx| {
+                                        this.update(cx, |view, cx| {
+                                            let on = view.proxy.running.is_some();
+                                            if on {
+                                                view.refresh_conn_table(cx);
+                                                cx.notify();
+                                            }
+                                            on
+                                        })
+                                        .unwrap_or(false)
+                                    });
+                                if !alive {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                        // “隧道已建立，系统代理已打开：N组M节点（入口）”
+                        self.proxy.status = Some(format!(
+                            "{}：{}组{}节点（{}）",
+                            t("app.proxy_started"),
+                            self.proxy.subscription.groups.len(),
+                            self.proxy.subscription.nodes.len(),
+                            crate::tools::proxy::mixed_addr()
+                        ));
+                    }
+                    Err(e) => {
+                        handle.stop();
+                        self.proxy.status = Some(e);
+                    }
+                }
+            }
+            Err(e) => self.proxy.status = Some(e),
+        }
+        cx.notify();
+    }
+
     /// 开关行：启动/断开 + 测速 + 本地入口；开着显示运行信息。
     fn render_proxy_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
@@ -1741,22 +1856,7 @@ impl WsShell {
                         .outline()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(handle) = this.proxy.running.take() {
-                                handle.stop();
-                            }
-                            // 活表一起扔：下次启动建新的，旧快照不复活。
-                            this.proxy.live = None;
-                            match crate::tools::proxy::disable_system_proxy() {
-                                // “已断开”
-                                Ok(()) => {
-                                    if let Err(e) = crate::settings::set_proxy_running(false) {
-                                        eprintln!("落隧道旗失败: {e}");
-                                    }
-                                    this.proxy.status = Some(t("app.proxy_stopped"))
-                                }
-                                Err(e) => this.proxy.status = Some(e),
-                            }
-                            cx.notify();
+                            this.proxy_tunnel_stop(cx);
                         })),
                 )
                 .child(div().text_size(px(TEXT_MD)).text_color(fg).child(info))
@@ -1770,93 +1870,7 @@ impl WsShell {
                         .primary()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if this.proxy_occupied() {
-                                return;
-                            }
-                            if this.proxy.subscription.nodes.is_empty() {
-                                // “先更新订阅并选择节点”
-                                this.proxy.status = Some(t("app.proxy_need_nodes"));
-                                cx.notify();
-                                return;
-                            };
-                            // 活分流表在点击瞬间建好：建索引（8 万条后缀排序）
-                            // 加占端口，几十毫秒，按钮上点一下无感。
-                            // 之后改选择直接换表里的内容，新连接即用，
-                            // 已建连的手里是旧快照，不受影响。
-                            let live = std::sync::Arc::new(std::sync::RwLock::new(
-                                crate::tools::proxy::RoutingTable::build(
-                                    this.proxy.subscription.clone(),
-                                    &this.proxy.manual_rules,
-                                    this.proxy.selections.clone(),
-                                    this.proxy.latencies.clone(),
-                                ),
-                            ));
-                            // 连接表和活分流表一起建：表是活的（一直记）。
-                            let registry = std::sync::Arc::new(std::sync::Mutex::new(
-                                crate::tools::proxy::ConnRegistry::default(),
-                            ));
-                            // 先占端口再开系统代理：端口被占直接报错，不动系统设置。
-                            match crate::tools::proxy::start_proxy(
-                                live.clone(),
-                                registry.clone(),
-                                crate::tools::proxy::MIXED_PORT,
-                            ) {
-                                Ok(handle) => {
-                                    match crate::tools::proxy::enable_system_proxy(
-                                        crate::tools::proxy::MIXED_PORT,
-                                    ) {
-                                        Ok(()) => {
-                                            // 隧道旗举起来：崩了/被杀了下次启动能认出来收尾。
-                                            if let Err(e) = crate::settings::set_proxy_running(true)
-                                            {
-                                                eprintln!("存隧道旗失败: {e}");
-                                            }
-                                            this.proxy.running = Some(handle);
-                                            this.proxy.conns = Some(registry);
-                                            this.proxy.live = Some(live);
-                                            // 连接表心跳：1 秒刷一次速度和时间，开着才跳，
-                                            // 停了自己退（running 没了就 break）。
-                                            cx.spawn(async move |this, cx| {
-                                                loop {
-                                                    cx.background_executor()
-                                                        .timer(std::time::Duration::from_secs(1))
-                                                        .await;
-                                                    let alive = cx
-                                                        .update(|cx| {
-                                                            this.update(cx, |view, cx| {
-                                                                let on = view.proxy.running.is_some();
-                                                                if on {
-                                                                    view.refresh_conn_table(cx);
-                                                                    cx.notify();
-                                                                }
-                                                                on
-                                                            })
-                                                            .unwrap_or(false)
-                                                        });
-                                                    if !alive {
-                                                        break;
-                                                    }
-                                                }
-                                            })
-                                            .detach();
-                                            // “隧道已建立，系统代理已打开：N组M节点（入口）”
-                                            this.proxy.status = Some(format!(
-                                                "{}：{}组{}节点（{}）",
-                                                t("app.proxy_started"),
-                                                this.proxy.subscription.groups.len(),
-                                                this.proxy.subscription.nodes.len(),
-                                                crate::tools::proxy::mixed_addr()
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            handle.stop();
-                                            this.proxy.status = Some(e);
-                                        }
-                                    }
-                                }
-                                Err(e) => this.proxy.status = Some(e),
-                            }
-                            cx.notify();
+                            this.proxy_tunnel_start(cx);
                         })),
                 )
                 .child(

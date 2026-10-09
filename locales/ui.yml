@@ -306,3 +306,57 @@ app:
   shot_cancel:
     en: Cancel
     zh-CN: 取消
+  spotlight_hint:
+    en: Search tools, commands, settings…
+    zh-CN: 搜索工具、命令、设置…
+  spotlight_empty:
+    en: No matches
+    zh-CN: 没有匹配结果
+  spotlight_footer:
+    en: ↑↓ navigate · Enter run · Esc close
+    zh-CN: ↑↓ 选择 · Enter 确认 · Esc 关闭
+  spotlight_group_tool:
+    en: Tools
+    zh-CN: 工具
+  spotlight_group_theme:
+    en: Themes
+    zh-CN: 主题
+  spotlight_group_language:
+    en: Language
+    zh-CN: 语言
+  spotlight_group_proxy:
+    en: Proxy
+    zh-CN: 代理
+  spotlight_group_system:
+    en: System
+    zh-CN: 系统
+  spotlight_hotkey_cmd:
+    en: Change summon shortcut
+    zh-CN: 修改呼出快捷键
+  settings_hotkey:
+    en: Summon shortcut
+    zh-CN: 呼出快捷键
+  settings_hotkey_hint:
+    en: Works globally, press the combo after clicking Change
+    zh-CN: 全局生效，点修改后直接按下组合键
+  hotkey_change:
+    en: Change
+    zh-CN: 修改
+  hotkey_reset:
+    en: Reset to default
+    zh-CN: 恢复默认
+  hotkey_recording:
+    en: Press the shortcut…, Esc to cancel
+    zh-CN: 按下快捷键…，Esc 取消
+  hotkey_need_modifier:
+    en: Must include at least one modifier key
+    zh-CN: 至少包含一个修饰键
+  hotkey_invalid:
+    en: Invalid shortcut
+    zh-CN: 快捷键格式无效
+  hotkey_conflict:
+    en: Registration failed, possibly taken by another app
+    zh-CN: 注册失败，可能被其他应用占用
+  hotkey_unavailable:
+    en: System hotkeys unavailable
+    zh-CN: 系统热键不可用

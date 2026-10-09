@@ -44,6 +44,8 @@ const KEY_PROXY_RUNNING: &str = "proxy_running";
 const KEY_WINDOW_BOUNDS: &str = "window_bounds";
 /// 侧边栏上次选中的工具序号。
 const KEY_SELECTED_TOOL: &str = "selected_tool";
+/// 呼出搜索条的全局快捷键（`"Alt+Space"` 这种写法，见 `spotlight`）。
+const KEY_HOTKEY: &str = "hotkey";
 
 /// 应用数据目录（平台相关，见模块文档）。
 pub fn data_dir() -> PathBuf {
@@ -523,6 +525,25 @@ pub fn set_selected_tool(ix: usize) -> Result<(), String> {
     })
 }
 
+/// 读呼出搜索条的快捷键原文；没存过或库坏了返回 `None`，
+/// 调用方回落默认（`spotlight::DEFAULT_HOTKEY`）。格式校验是 `spotlight`
+/// 的事，这里只存原文（非法值读出来照给，调用方解析失败再回落）。
+pub fn hotkey() -> Option<String> {
+    block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_HOTKEY).await.ok()?
+    })
+}
+
+/// 存呼出快捷键原文。调用方先过 `spotlight` 的解析，非法不进库。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_hotkey(spec: &str) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_HOTKEY, spec).await
+    })
+}
+
 /// 测试隔离器：把设置库指向临时文件，drop 时还原指向并删除临时文件。
 /// 必须在 `i18n::lock_locale()` 之后使用（和改 locale 的测试同串行）。
 #[cfg(test)]
@@ -872,5 +893,17 @@ mod tests {
                 .expect("能种坏数据");
         });
         assert_eq!(selected_tool(), None, "非法序号读 None");
+    }
+
+    #[test]
+    fn hotkey_roundtrip_through_public_api() {
+        // 快捷键原文走公共 API 往返：空库读 None，写完读回一致（只存原文）。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("hotkey");
+        use super::hotkey;
+        use super::set_hotkey;
+        assert_eq!(hotkey(), None, "没存过读 None");
+        set_hotkey("Alt+Space").expect("能写快捷键");
+        assert_eq!(hotkey().as_deref(), Some("Alt+Space"), "原文往返一致");
     }
 }
