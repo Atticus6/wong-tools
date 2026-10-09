@@ -6,6 +6,8 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::*;
 
+use crate::i18n::{Strings, t};
+
 /// Spur 度量 token。
 const TITLEBAR_H: f32 = 38.0;
 const HEADER_H: f32 = 44.0;
@@ -18,33 +20,58 @@ const TEXT_SM: f32 = 12.0;
 const TEXT_MD: f32 = 13.0;
 const TEXT_LG: f32 = 15.0;
 
-/// 一条侧边栏入口。真工具会把占位 `hint` 换成自己的视图；
-/// 入口本身永远是名称 + 图标 + 提示三件套。
+/// 工具标识：导航、标题、图标都从它派生，保证三处不脱节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolId {
+    Welcome,
+    Text,
+    Convert,
+    Settings,
+}
+
+impl ToolId {
+    /// 侧边栏和内容区显示的名称，随当前语言走。
+    fn name(self, s: &Strings) -> &str {
+        match self {
+            ToolId::Welcome => &s.tool_welcome,
+            ToolId::Text => &s.tool_text,
+            ToolId::Convert => &s.tool_convert,
+            ToolId::Settings => &s.tool_settings,
+        }
+    }
+
+    /// 名称旁边的副提示，随当前语言走。
+    fn hint(self, s: &Strings) -> &str {
+        match self {
+            ToolId::Welcome => &s.tool_welcome_hint,
+            ToolId::Text => &s.tool_text_hint,
+            ToolId::Convert => &s.tool_convert_hint,
+            ToolId::Settings => &s.tool_settings_hint,
+        }
+    }
+}
+
+/// 一条侧边栏入口。真工具会配自己的视图；入口本身永远是标识 + 图标。
 struct ToolDef {
-    name: &'static str,
-    hint: &'static str,
+    id: ToolId,
     icon: IconName,
 }
 
 const TOOLS: &[ToolDef] = &[
     ToolDef {
-        name: "欢迎",
-        hint: "工具箱首页",
+        id: ToolId::Welcome,
         icon: IconName::House,
     },
     ToolDef {
-        name: "文本工具",
-        hint: "敬请期待",
+        id: ToolId::Text,
         icon: IconName::FileText,
     },
     ToolDef {
-        name: "格式转换",
-        hint: "敬请期待",
+        id: ToolId::Convert,
         icon: IconName::ArrowLeftRight,
     },
     ToolDef {
-        name: "设置",
-        hint: "主题与偏好",
+        id: ToolId::Settings,
         icon: IconName::Settings,
     },
 ];
@@ -62,6 +89,7 @@ impl WsShell {
     }
 
     fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tx = t();
         let accent = cx.theme().link;
         let fg = cx.theme().foreground;
         let title_bg = cx.theme().title_bar;
@@ -104,14 +132,14 @@ impl WsShell {
                         div()
                             .text_size(px(TEXT_MD))
                             .text_color(fg)
-                            .child("Wong Tools"),
+                            .child(tx.app_name.as_str()),
                     ),
             )
             // 品牌和标题栏按钮之间的弹性拖拽区。
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
             .child(
                 Button::new("new-tool")
-                    .label("新建")
+                    .label(tx.new_tool.as_str())
                     .small()
                     .outline()
                     .cursor_pointer()
@@ -171,12 +199,15 @@ impl WsShell {
                         cx.notify();
                     }))
                     .child(Icon::new(tool.icon.clone()).size(px(14.)))
-                    .child(div().text_size(px(TEXT_MD)).child(tool.name))
+                    .child(div().text_size(px(TEXT_MD)).child(tool.id.name(t())))
             }))
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tool = &TOOLS[self.selected];
+        let tx = t();
+        let name = tool.id.name(tx);
+        let hint = tool.id.hint(tx);
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let border = cx.theme().border;
@@ -198,8 +229,8 @@ impl WsShell {
                     .gap(px(8.))
                     .border_b_1()
                     .border_color(border)
-                    .child(div().text_size(px(TEXT_LG)).text_color(fg).child(tool.name))
-                    .child(div().text_size(px(TEXT_SM)).text_color(muted).child(tool.hint)),
+                    .child(div().text_size(px(TEXT_LG)).text_color(fg).child(name))
+                    .child(div().text_size(px(TEXT_SM)).text_color(muted).child(hint)),
             )
             .child(
                 div()
@@ -210,12 +241,12 @@ impl WsShell {
                     .justify_center()
                     .gap(px(8.))
                     .child(Icon::new(tool.icon.clone()).size(px(28.)).text_color(muted))
-                    .child(div().text_size(px(TEXT_LG)).text_color(fg).child(tool.name))
+                    .child(div().text_size(px(TEXT_LG)).text_color(fg).child(name))
                     .child(
                         div()
                             .text_size(px(TEXT_MD))
                             .text_color(muted)
-                            .child("功能即将到来，敬请期待"),
+                            .child(tx.coming_soon.as_str()),
                     ),
             )
     }
@@ -296,21 +327,24 @@ mod tests {
     // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
     // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::TOOLS;
+    use crate::i18n::{LANGUAGES, parse};
 
     #[test]
     fn sidebar_tools_are_registered_without_duplicates() {
         // 侧边栏按表渲染，一行一项；表空了或重名导航就坏了。
         assert!(!TOOLS.is_empty(), "TOOLS 至少要有一项");
+        // 所有语言的文案表都要能解析，每种语言下逐项检查。
+        let langs: Vec<_> = LANGUAGES.iter().map(|l| parse(*l)).collect();
         let mut names = Vec::new();
         for tool in TOOLS {
-            assert!(!tool.name.is_empty(), "工具名不能为空");
-            assert!(!tool.hint.is_empty(), "工具提示不能为空");
-            assert!(
-                !names.contains(&tool.name),
-                "侧边栏入口重名 {}",
-                tool.name
-            );
-            names.push(tool.name);
+            // 每种语言都要有东西，不能有一边是空的。
+            for lang in &langs {
+                assert!(!tool.id.name(lang).is_empty(), "工具名不能为空");
+                assert!(!tool.id.hint(lang).is_empty(), "工具提示不能为空");
+            }
+            let name = tool.id.name(&langs[0]).to_string();
+            assert!(!names.contains(&name), "侧边栏入口重名 {name}");
+            names.push(name);
         }
     }
 }

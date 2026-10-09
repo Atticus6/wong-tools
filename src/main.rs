@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod i18n;
 mod shell;
 mod theme;
 
@@ -31,7 +32,7 @@ fn load_fonts(cx: &mut App) {
 fn window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
-            title: Some("Wong Tools".into()),
+            title: Some(crate::i18n::t().window_title.as_str().into()),
             appears_transparent: true,
             traffic_light_position: None,
         }),

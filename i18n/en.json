@@ -1,0 +1,14 @@
+{
+  "app_name": "Wong Tools",
+  "window_title": "Wong Tools",
+  "new_tool": "New",
+  "tool_welcome": "Welcome",
+  "tool_welcome_hint": "Toolbox home",
+  "tool_text": "Text Tools",
+  "tool_text_hint": "Coming soon",
+  "tool_convert": "Format Converter",
+  "tool_convert_hint": "Coming soon",
+  "tool_settings": "Settings",
+  "tool_settings_hint": "Themes & preferences",
+  "coming_soon": "This feature is coming soon"
+}

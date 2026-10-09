@@ -1,0 +1,14 @@
+{
+  "app_name": "Wong Tools",
+  "window_title": "Wong Tools",
+  "new_tool": "新建",
+  "tool_welcome": "欢迎",
+  "tool_welcome_hint": "工具箱首页",
+  "tool_text": "文本工具",
+  "tool_text_hint": "敬请期待",
+  "tool_convert": "格式转换",
+  "tool_convert_hint": "敬请期待",
+  "tool_settings": "设置",
+  "tool_settings_hint": "主题与偏好",
+  "coming_soon": "功能即将到来，敬请期待"
+}
