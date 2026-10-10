@@ -173,6 +173,7 @@ impl WsShell {
             .gap(px(12.))
             .child(self.render_airelay_controls(cx))
             .child(self.render_airelay_port(cx))
+            .child(self.render_airelay_codex(cx))
             .child(
                 TabBar::new("airelay-tabs")
                     .underline()
@@ -383,6 +384,46 @@ impl WsShell {
                     .text_color(muted)
                     // “改完点启动生效”
                     .child(t("app.airelay_port_hint")),
+            )
+    }
+
+    /// Codex 一键配置行：当前端口 + 生效模型写入 `~/.codex/config.toml`。
+    /// 网关开不开都能点（读的是输入框和模型表）；只写本地小文件，
+    /// 毫秒级，直接在点击里调，不扔后台。
+    fn render_airelay_codex(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                Button::new("airelay-codex")
+                    // “配置 Codex”
+                    .label(t("app.airelay_codex"))
+                    .small()
+                    .outline()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let port = this.airelay.port(cx);
+                        let (models, _) = this.airelay.model_list();
+                        let model = this.airelay.effective_model(&models);
+                        // “Codex 配置已写入”，失败直接展示原因。
+                        this.airelay.status = Some(match super::codex::configure(port, &model) {
+                            Ok(path) => {
+                                format!("{}：{}", t("app.airelay_codex_done"), path.display())
+                            }
+                            Err(e) => e,
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_SM))
+                    .text_color(muted)
+                    // “写入 ~/.codex/config.toml，指向本地网关”
+                    .child(t("app.airelay_codex_hint")),
             )
     }
 

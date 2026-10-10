@@ -459,3 +459,12 @@ app:
   airelay_tab_reqs:
     en: Requests
     zh-CN: 请求
+  airelay_codex:
+    en: Set up Codex
+    zh-CN: 配置 Codex
+  airelay_codex_hint:
+    en: Writes ~/.codex/config.toml to use the local gateway
+    zh-CN: 写入 ~/.codex/config.toml，指向本地网关
+  airelay_codex_done:
+    en: Codex config written
+    zh-CN: Codex 配置已写入

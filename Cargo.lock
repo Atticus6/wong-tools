@@ -9655,6 +9655,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "tokio",
+ "toml_edit 0.22.27",
  "tungstenite",
  "ureq",
  "xcap",

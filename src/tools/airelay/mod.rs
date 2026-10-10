@@ -4,6 +4,7 @@
 //! `server` 是回环 HTTP 服务（阻塞线程模型，和代理工具同款）；
 //! `view` 是工具页（`impl WsShell`，状态走 `pub(crate)`）。
 
+pub mod codex;
 pub mod server;
 pub mod view;
 pub mod zen;

@@ -254,6 +254,9 @@ mod tests {
         "app.airelay_egress_blocked",
         "app.airelay_tab_models",
         "app.airelay_tab_reqs",
+        "app.airelay_codex",
+        "app.airelay_codex_hint",
+        "app.airelay_codex_done",
     ];
 
     #[test]
