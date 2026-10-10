@@ -62,6 +62,19 @@ pub fn crop(img: &image::RgbaImage, x: u32, y: u32, w: u32, h: u32) -> image::Rg
     image::imageops::crop_imm(img, x, y, w, h).to_image()
 }
 
+/// 矩形整体平移（逻辑像素）：宽高不变，只挪起点。
+///
+/// 窗内坐标和捕获图坐标差一段系统保留区（macOS 菜单栏），换算回去前
+/// 要先把这段补上，见 `SelectOverlay::cropped`。
+pub fn translate(rect: LogicRect, dx: f32, dy: f32) -> LogicRect {
+    LogicRect {
+        x: rect.x + dx,
+        y: rect.y + dy,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
 /// 选区之外的变暗矩形（上/下/左/右，x,y,w,h 逻辑像素）。
 /// 没选区时返回整窗一块，调用方直接全暗。
 pub fn dim_rects(sel: Option<LogicRect>, w: f32, h: f32) -> Vec<(f32, f32, f32, f32)> {
@@ -119,6 +132,7 @@ mod tests {
     use super::normalize;
     use super::to_pixels;
     use super::toolbar_rect;
+    use super::translate;
     use super::TOOLBAR_H;
     use super::TOOLBAR_W;
 
@@ -173,6 +187,36 @@ mod tests {
         let cut = crop(&img, 10, 10, 20, 30);
         assert_eq!((cut.width(), cut.height()), (20, 30));
         assert_eq!(cut.get_pixel(0, 0), img.get_pixel(10, 10));
+    }
+
+    #[test]
+    fn translate_moves_origin_and_keeps_size() {
+        // macOS 菜单栏高度内缩：窗内选区往捕获图坐标挪。
+        let r = super::LogicRect { x: 10., y: 20., w: 100., h: 50. };
+        assert_eq!(
+            translate(r, 0., 25.),
+            super::LogicRect { x: 10., y: 45., w: 100., h: 50. }
+        );
+        // 平移 0 是恒等（Windows 路径）。
+        assert_eq!(translate(r, 0., 0.), r);
+    }
+
+    #[test]
+    fn translated_rect_crops_right_pixels() {
+        // 整条链路：窗内拖拽 → 补菜单栏内缩 → 物理像素 → 裁剪。
+        let img = image::RgbaImage::from_fn(200, 200, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 7, 255])
+        });
+        // 窗内 (10,20)-(110,70)，内缩 25 → 捕获图 (10,45)-(110,95)。
+        let sel = translate(
+            super::LogicRect { x: 10., y: 20., w: 100., h: 50. },
+            0.,
+            25.,
+        );
+        let (x, y, w, h) = to_pixels(sel, 1., 200, 200).expect("成选区");
+        assert_eq!((x, y, w, h), (10, 45, 100, 50));
+        let cut = crop(&img, x, y, w, h);
+        assert_eq!(cut.get_pixel(0, 0), img.get_pixel(10, 45));
     }
 
     #[test]

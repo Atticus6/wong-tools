@@ -43,6 +43,16 @@ fn rgba_to_render_image(img: &image::RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(SmallVec::from_elem(Frame::new(buf), 1)))
 }
 
+/// GPUI 的 `Bounds<Pixels>` 摊成 `(x, y, w, h)`，`overlay_placement` 好接。
+fn rect4(b: Bounds<Pixels>) -> (f32, f32, f32, f32) {
+    (
+        b.origin.x.as_f32(),
+        b.origin.y.as_f32(),
+        b.size.width.as_f32(),
+        b.size.height.as_f32(),
+    )
+}
+
 pub struct SelectOverlay {
     /// 全分辨率原图（裁剪用）。
     image: image::RgbaImage,
@@ -52,6 +62,11 @@ pub struct SelectOverlay {
     scale: f32,
     /// 窗口逻辑尺寸：选区钳制和工具条判定用（开窗时定死，全屏不动）。
     size: Size<Pixels>,
+    /// 顶边被系统保留区（macOS 菜单栏）吃掉的高度，逻辑像素。冻结帧要按
+    /// 它往上挪，选区换算回原图时也要补回来，否则差一个菜单栏的高度。
+    top_inset: f32,
+    /// 冻结帧整幅的逻辑高度（含被菜单栏盖住那几行），渲染时按它铺。
+    frozen_h: f32,
     anchor: Option<Point<Pixels>>,
     current: Point<Pixels>,
     dragging: bool,
@@ -74,11 +89,28 @@ impl SelectOverlay {
             image.width(),
             image.height()
         );
-        let (lx, ly, lw, lh) = geo.logical();
+
+        // 落位要按 GPUI 的显示器信息算，不能只信 xcap：macOS 会把盖菜单栏的
+        // 窗口往下挪，我们得自己把顶部让出来，不然屏幕上两个菜单栏
+        // （详见 overlay_placement 的注释）。读不到显示器就退回全屏无内缩，
+        // 行为跟修复前一致，不会更糟。
+        let (_, _, lw, lh) = geo.logical();
+        let placement = cx
+            .primary_display()
+            .map(|d| {
+                let f = d.bounds();
+                let v = d.visible_bounds();
+                super::overlay_placement(rect4(f), rect4(v))
+            })
+            .unwrap_or(super::overlay_placement((0., 0., lw, lh), (0., 0., lw, lh)));
+        // 冻结帧整幅高：拿捕获图的物理像素反推逻辑高，别信窗口尺寸——
+        // 窗口被系统挪过/裁过，尺寸不等于捕获图原高。
+        let frozen_h = image.height() as f32 / geo.scale;
+
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(lx), px(ly)),
-                size: size(px(lw), px(lh)),
+                origin: point(px(placement.origin.0), px(placement.origin.1)),
+                size: size(px(placement.size.0), px(placement.size.1)),
             })),
             titlebar: Some(TitlebarOptions {
                 // “框选截图”
@@ -95,7 +127,19 @@ impl SelectOverlay {
             ..WindowOptions::default()
         };
         open_window(options, cx, |window, cx| {
-            cx.new(|cx| Self::new(shell, image, frozen, lw, lh, window, cx))
+            cx.new(|cx| {
+                Self::new(
+                    shell,
+                    image,
+                    frozen,
+                    placement.size.0,
+                    placement.size.1,
+                    placement.top_inset,
+                    frozen_h,
+                    window,
+                    cx,
+                )
+            })
         })
         .map(|_| ())
         .map_err(|e| format!("打不开覆盖层: {e}"))?;
@@ -109,6 +153,8 @@ impl SelectOverlay {
         frozen: Arc<RenderImage>,
         lw: f32,
         lh: f32,
+        top_inset: f32,
+        frozen_h: f32,
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Self {
@@ -117,6 +163,8 @@ impl SelectOverlay {
             frozen,
             scale: window.scale_factor(),
             size: size(px(lw), px(lh)),
+            top_inset,
+            frozen_h,
             anchor: None,
             current: point(px(0.), px(0.)),
             dragging: false,
@@ -171,8 +219,13 @@ impl SelectOverlay {
     }
 
     /// 当前选区的裁剪图（逻辑→物理换算 + 界内钳制，见 select）。
+    ///
+    /// 窗内 y=0 是覆盖层窗口顶边，它在屏幕上比捕获图顶端低 `top_inset`
+    /// （macOS 菜单栏）。所以选区往回收之前先把这段补回去，否则裁出来的
+    /// 图整体上移一个菜单栏的高度。
     fn cropped(&self) -> Option<image::RgbaImage> {
         let rect = self.selection()?;
+        let rect = super::select::translate(rect, 0., self.top_inset);
         let (x, y, w, h) =
             super::select::to_pixels(rect, self.scale, self.image.width(), self.image.height())?;
         Some(super::select::crop(&self.image, x, y, w, h))
@@ -243,7 +296,16 @@ impl Render for SelectOverlay {
             .bg(black())
             .cursor_crosshair()
             // 冻结帧：不透明铺满（shotori 原样：flow + size_full）。
-            .child(img(self.frozen.clone()).size_full())
+            // 上移 top_inset：窗顶在菜单栏之下，冻结帧第 0 行是捕获时的菜单栏，
+            // 不上移就会跟真菜单栏叠成两个（见 open() 的注释）。
+            .child(
+                img(self.frozen.clone())
+                    .absolute()
+                    .left_0()
+                    .top(px(-self.top_inset))
+                    .w(self.size.width)
+                    .h(px(self.frozen_h)),
+            )
             // 变暗 + 描边：canvas 直接画，不经过布局（shotori 原样）。
             .child(dim_canvas(sel, accent))
             // 事件网：窗口级鼠标监听（shotori 原样）。

@@ -88,6 +88,15 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   在屏幕边缘。工具条是图标按钮 + tooltip + 分隔符（shotori 原样），
   盒子尺寸和命中判定用同一组常量，见 `select::TOOLBAR_W/H`。
   没选区时工具条不显示（`in_toolbar` 同样放行，按下直接起拖）。
+  **macOS 菜单栏**：系统不许普通窗盖菜单栏，`open_window` 要的全屏矩形
+  会被悄悄挪到菜单栏下沿（1x 屏 pos=(0,25)、Retina pos=(0,38)，高度仍
+  给足），冻结帧整体下移 → 屏幕上两个菜单栏 + 底部少一截。落位改用
+  `Display::bounds()` / `visible_bounds()` 的**顶边差**（`mod.rs` 的
+  `overlay_placement`，只认顶边否则 Dock 会被排除出选区），冻结帧按
+  `-top_inset` 上移铺满，选区裁剪前用 `select::translate` 补回这段偏移。
+  同时 xcap 语义按平台不同（macOS `CGDisplayBounds` 给逻辑点，Windows
+  `dmPelsWidth` 给物理像素），`primary_geometry` 统一归一成逻辑点，
+  `logical()` 不再二次除缩放——HiDPI 下多除一次覆盖层就缩一半。
 - `src/tools/proxy/mod.rs`——代理工具：Clash 订阅解析（节点只收 VLESS，
   分组照单收，规则收 DOMAIN / SUFFIX / KEYWORD / CIDR / MATCH，GEOIP 等
   跑不了的记 `Unsupported` 跳过）、按规则分流（`DIRECT` 裸连、`REJECT`

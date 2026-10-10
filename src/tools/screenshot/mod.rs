@@ -33,13 +33,22 @@ fn primary_monitor() -> Result<xcap::Monitor, String> {
         .ok_or_else(|| "没找到主显示器".to_string())
 }
 
-/// 主显示器几何（物理像素 + 缩放），覆盖层定位用。
+/// 主显示器几何，覆盖层定位用。
+///
+/// `w`/`h` 是**逻辑像素**（点），`scale` 是物理/逻辑比（HiDPI 为 2.0）。
+/// 注意 xcap 各平台语义不同：macOS 的 `Monitor::width/height` 走
+/// `CGDisplayBounds`，本来就是逻辑点；Windows 走 `dmPelsWidth`，是物理像素。
+/// 这里统一在读入时归一到逻辑点，下游（含 `logical()`）就只当逻辑点用，
+/// 免得再按平台各扣一次缩放——扣错就是覆盖层缩一半。
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorGeometry {
+    /// 全局坐标原点（逻辑点，macOS 全局系以主屏左上为原点）。
     pub x: i32,
     pub y: i32,
+    /// 逻辑宽高（点）。
     pub w: u32,
     pub h: u32,
+    /// 物理/逻辑比，捕获图转物理像素时用。
     pub scale: f32,
 }
 
@@ -47,24 +56,79 @@ pub struct MonitorGeometry {
 /// 差的只是 HiDPI 下的清晰度，不会错位）。
 pub fn primary_geometry() -> Result<MonitorGeometry, String> {
     let m = primary_monitor()?;
+    let scale = m.scale_factor().unwrap_or(1.0).max(0.01);
+    // macOS 直接就是逻辑点；Windows 是物理像素，换算成逻辑点。
+    #[cfg(target_os = "macos")]
+    let (w, h) = (
+        m.width().map_err(|e| format!("读显示器尺寸失败: {e}"))?,
+        m.height().map_err(|e| format!("读显示器尺寸失败: {e}"))?,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (w, h) = (
+        (m.width().map_err(|e| format!("读显示器尺寸失败: {e}"))? as f32 / scale).round() as u32,
+        (m.height().map_err(|e| format!("读显示器尺寸失败: {e}"))? as f32 / scale).round() as u32,
+    );
     Ok(MonitorGeometry {
         x: m.x().map_err(|e| format!("读显示器位置失败: {e}"))?,
         y: m.y().map_err(|e| format!("读显示器位置失败: {e}"))?,
-        w: m.width().map_err(|e| format!("读显示器尺寸失败: {e}"))?,
-        h: m.height().map_err(|e| format!("读显示器尺寸失败: {e}"))?,
-        scale: m.scale_factor().unwrap_or(1.0),
+        w,
+        h,
+        scale,
     })
 }
 
 impl MonitorGeometry {
-    /// 逻辑像素界（物理 / 缩放）：GPUI 窗口坐标和鼠标事件都用这套。
+    /// 逻辑像素界 `(x, y, w, h)`：GPUI 窗口坐标和鼠标事件都用这套。
+    /// `w`/`h` 入库时已归一为逻辑点，这里原样返回，不再除缩放。
     pub fn logical(&self) -> (f32, f32, f32, f32) {
         (
-            self.x as f32 / self.scale,
-            self.y as f32 / self.scale,
-            self.w as f32 / self.scale,
-            self.h as f32 / self.scale,
+            self.x as f32,
+            self.y as f32,
+            self.w as f32,
+            self.h as f32,
         )
+    }
+}
+
+/// 覆盖层在主屏上的落位：窗口矩形 + 顶部被系统占掉的逻辑像素。
+///
+/// macOS 不允许普通窗口盖住菜单栏，`open_window` 要的全屏矩形会被系统悄悄
+/// 挪到菜单栏下沿（实测 1x 屏 pos=(0,25)、Retina 屏 pos=(0,38)，而高度仍
+/// 按原样给足）。冻结帧本身含菜单栏那几行，整幅跟着下移后屏幕上就出现两
+/// 个菜单栏，底部还少一截看不见。Windows 任务栏在下沿，顶边不内缩，行为
+/// 与修复前完全一致。
+///
+/// 差量只认顶边：Dock 在下沿，用整块 `visible_bounds` 反而会把 Dock 排除
+/// 在选区外，截不到它。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayPlacement {
+    /// 覆盖层窗口矩形（逻辑像素，全局坐标）。
+    pub origin: (f32, f32),
+    /// 覆盖层窗口尺寸（逻辑像素）。
+    pub size: (f32, f32),
+    /// 顶边被系统保留区（macOS 菜单栏）吃掉的高度，逻辑像素。
+    pub top_inset: f32,
+}
+
+/// 按显示器的全屏界和可见界算覆盖层落位。
+///
+/// `full` / `visible` 都是 `(x, y, w, h)` 逻辑像素，取自 GPUI 的
+/// `Display::bounds()` / `visible_bounds()`（同一坐标系）。
+///
+/// **只认 visible 的顶边**：macOS 的 `visible_bounds` 顶边被菜单栏压下去，
+/// 底边又被 Dock 抬上来，两边一减就成了「屏幕减去上下装饰」那块，套上去
+/// 会把 Dock 排除在选区外截不到。顶边差值单独取才是菜单栏的真实高度。
+/// 负数（理论上不会出现）一律收成 0。
+pub fn overlay_placement(
+    full: (f32, f32, f32, f32),
+    visible: (f32, f32, f32, f32),
+) -> OverlayPlacement {
+    let (fx, fy, fw, fh) = full;
+    let top_inset = (visible.1 - fy).clamp(0., fh);
+    OverlayPlacement {
+        origin: (fx, fy + top_inset),
+        size: (fw, (fh - top_inset).max(0.)),
+        top_inset,
     }
 }
 
@@ -133,6 +197,7 @@ mod tests {
     use super::MonitorGeometry;
     use super::copy_image;
     use super::encode_png;
+    use super::overlay_placement;
     use super::save_png;
     use super::thumbnail_png;
     use super::timestamped_name;
@@ -181,16 +246,30 @@ mod tests {
     }
 
     #[test]
-    fn logical_divides_physical_by_scale() {
-        // 纯数学，不碰显示器：4K 物理 @2x 缩放 = 1920x1080 逻辑。
+    fn logical_passes_through_already_normalized_points() {
+        // 入库已归一成逻辑点，logical() 不该再除缩放。
+        // 2x 屏：逻辑 1470x956 就是 1470x956（早期版本误除 2，overlay 缩一半）。
         let geo = MonitorGeometry {
             x: 0,
             y: 0,
-            w: 3840,
-            h: 2160,
+            w: 1470,
+            h: 956,
             scale: 2.0,
         };
-        assert_eq!(geo.logical(), (0., 0., 1920., 1080.));
+        assert_eq!(geo.logical(), (0., 0., 1470., 956.));
+    }
+
+    #[test]
+    fn logical_keeps_scale_for_capture_conversion() {
+        // 缩放仍要留着给 `to_pixels`：逻辑选区 × scale 才是捕获图的物理像素。
+        let geo = MonitorGeometry {
+            x: 0,
+            y: 0,
+            w: 1470,
+            h: 956,
+            scale: 2.0,
+        };
+        assert_eq!(geo.scale, 2.0);
     }
 
     #[test]
@@ -200,6 +279,72 @@ mod tests {
         let mut clipboard = arboard::Clipboard::new().expect("能打开剪贴板");
         let back = clipboard.get_image().expect("能读回");
         assert_eq!((back.width, back.height), (2, 2), "剪贴板图片尺寸不对");
+    }
+
+    #[test]
+    fn placement_shifts_window_below_macos_menu_bar() {
+        // macOS 实测（1x 屏）：全屏 (0,0,1920,1080)，可见区顶边被菜单栏压到 25。
+        // 覆盖层必须自己让出这 25，否则系统再推一次就出两个菜单栏。
+        let p = overlay_placement((0., 0., 1920., 1080.), (0., 25., 1920., 1023.));
+        assert_eq!(p.top_inset, 25.);
+        assert_eq!(p.origin, (0., 25.));
+        // 高度是「全屏减内缩」，不是直接用 visible 的高：Dock 在下沿，
+        // 用 visible 会把 Dock 排除在选区外。
+        assert_eq!(p.size, (1920., 1055.));
+    }
+
+    #[test]
+    fn placement_handles_retina_menu_bar_height() {
+        // Retina 实测：逻辑 1470x956，菜单栏 38pt（捕获图是 2940x1912 物理）。
+        // 内缩跟缩放无关，只认逻辑点的顶边差。
+        let p = overlay_placement((0., 0., 1470., 956.), (0., 38., 1470., 886.));
+        assert_eq!(p.top_inset, 38.);
+        assert_eq!(p.origin, (0., 38.));
+        assert_eq!(p.size, (1470., 918.));
+    }
+
+    #[test]
+    fn placement_is_identity_when_menu_bar_absent() {
+        // Windows 任务栏在下沿：可见区顶边 == 全屏顶边，内缩 0，行为不变。
+        let p = overlay_placement((0., 0., 1920., 1080.), (0., 0., 1920., 1040.));
+        assert_eq!(p.top_inset, 0.);
+        assert_eq!(p.origin, (0., 0.));
+        assert_eq!(p.size, (1920., 1080.));
+    }
+
+    #[test]
+    fn placement_clamps_inset_to_screen_height() {
+        // 读不到显示器 / 多屏坐标系错乱时不该算出负高度或负内缩。
+        let p = overlay_placement((0., 0., 1920., 1080.), (0., -50., 1920., 1080.));
+        assert_eq!(p.top_inset, 0.);
+        assert_eq!(p.size.1, 1080.);
+        // 内缩大于屏高（脏数据）也不能出负高度。
+        let p = overlay_placement((0., 0., 1920., 1080.), (0., 5000., 1920., 10.));
+        assert_eq!(p.top_inset, 1080.);
+        assert_eq!(p.size.1, 0.);
+    }
+
+    #[test]
+    fn placement_offsets_for_non_zero_display_origin() {
+        // 非主屏 / 副屏在主屏右边时，横坐标要跟着显示器走，不能写死 0。
+        let p = overlay_placement((1920., 0., 2560., 1440.), (1920., 25., 2560., 1383.));
+        assert_eq!(p.top_inset, 25.);
+        assert_eq!(p.origin, (1920., 25.));
+        assert_eq!(p.size, (2560., 1415.));
+    }
+
+    #[test]
+    fn placement_keeps_window_bottom_at_screen_bottom() {
+        // 渲染的对齐前提：冻结帧按 -top_inset 上移后第 0 行落在窗口顶，
+        // 而窗口底必须正好贴屏幕底，否则底部那截（Dock）露白或被切掉。
+        let p = overlay_placement((0., 0., 1920., 1080.), (0., 25., 1920., 1023.));
+        assert_eq!(
+            p.origin.1 + p.size.1,
+            1080.,
+            "窗口底没贴屏幕底，底部会露白"
+        );
+        // 冻结帧整幅高 = 窗口高 + 内缩：盖住窗口还得多出菜单栏那么高。
+        assert_eq!(p.size.1 + p.top_inset, 1080.);
     }
 
     #[test]
