@@ -907,6 +907,7 @@ mod tests {
         sub.groups.push(crate::tools::proxy::ProxyGroup {
             name: "g1".to_string(),
             kind: "select".to_string(),
+            interval: crate::tools::proxy::DEFAULT_AUTO_INTERVAL_SECS,
             members: vec!["n1".to_string()],
         });
         set_proxy_subscription(&sub).expect("能写订阅");
@@ -1020,6 +1021,7 @@ mod tests {
             groups: vec![ProxyGroup {
                 name: "g1".to_string(),
                 kind: "select".to_string(),
+                interval: crate::tools::proxy::DEFAULT_AUTO_INTERVAL_SECS,
                 members: vec!["n1".to_string()],
             }],
             rules: vec![Rule {

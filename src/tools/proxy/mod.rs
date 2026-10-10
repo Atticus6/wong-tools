@@ -146,13 +146,83 @@ impl RawNode {
 /// 订阅里的一个策略组：名称 + 类型 + 成员名。
 /// 成员名三种：节点名、嵌套组名、`DIRECT` / `REJECT` 关键字，
 /// 渲染时经 `resolve_members` 落位，对不上的一律丢掉。
+/// `interval` 只对 `url-test` 组有意义（订阅里的秒数，自动测速用，
+/// 没写按 `DEFAULT_AUTO_INTERVAL_SECS` 走，老库数据反序列化同样缺省）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyGroup {
     /// 组名（中文见订阅原文，如“节点选择”）。
     pub name: String,
     /// 组类型原文（`select` / `url-test` 之类，界面只做展示）。
     pub kind: String,
+    #[serde(default = "default_group_interval")]
+    pub interval: u64,
     pub members: Vec<String>,
+}
+
+/// 分组缺省测速间隔（秒）：订阅没写 `interval:` 就按这个来（Clash 常见 300）。
+pub const DEFAULT_AUTO_INTERVAL_SECS: u64 = 300;
+/// 自动测速间隔下限（秒）：订阅写得太密（如 10 秒）直接夹到 60 秒，
+/// 免得把节点和界面都测炸。
+pub const AUTO_INTERVAL_FLOOR_SECS: u64 = 60;
+/// 启动后首次自动测速的等待：隧道刚起来先稳一下，再测第一轮。
+pub const AUTO_TEST_INITIAL_DELAY: Duration = Duration::from_secs(5);
+
+/// 分组 interval 的反序列化缺省：老库 JSON 里没这个字段，和订阅没写一样处理。
+fn default_group_interval() -> u64 {
+    DEFAULT_AUTO_INTERVAL_SECS
+}
+
+/// 是否自动选择组：只有 `url-test` 由延迟决定去向，其他类型一律手动。
+/// 界面高亮、组头展示、定时测速都认它，分流里的 `resolve_target` 同理。
+pub fn is_auto_group(group: &ProxyGroup) -> bool {
+    group.kind == "url-test"
+}
+
+/// 组内当前最快节点名：界面高亮和组头展示用（分流逻辑走 `fastest_node`）。
+/// 一个都没测过返回 None（调用方显示待测）：路由兜底会用首个节点保活，
+/// 但界面不能把兜底谎称成“最快”。
+pub fn fastest_node_name(
+    subscription: &Subscription,
+    group: &ProxyGroup,
+    latencies: &HashMap<String, Option<u64>>,
+) -> Option<String> {
+    let measured = group.members.iter().any(|name| {
+        subscription.nodes.iter().any(|n| &n.name == name)
+            && latencies.get(name).copied().flatten().is_some()
+    });
+    if !measured {
+        return None;
+    }
+    fastest_node(subscription, group, latencies).map(|node| node.name)
+}
+
+/// 所有自动组待测节点（按名去重保序）：定时循环每轮就测这些，
+/// 组间重叠的节点只测一次，结果各组共享。
+pub fn auto_test_nodes(subscription: &Subscription) -> Vec<ProxyNode> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for group in subscription.groups.iter().filter(|g| is_auto_group(g)) {
+        for member in resolve_members(subscription, group) {
+            if let GroupMember::Node(node) = member {
+                if seen.insert(node.name.clone()) {
+                    out.push(node.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 定时测速间隔（秒）：取各自动组的最小 interval，夹到下限；
+/// 没有自动组回默认。调用方直接喂给 timer，每轮重算（订阅刷新即生效）。
+pub fn auto_test_interval_secs(subscription: &Subscription) -> u64 {
+    subscription
+        .groups
+        .iter()
+        .filter(|group| is_auto_group(group))
+        .map(|group| group.interval.max(AUTO_INTERVAL_FLOOR_SECS))
+        .min()
+        .unwrap_or(DEFAULT_AUTO_INTERVAL_SECS)
 }
 
 /// 解析好的订阅：节点 + 策略组 + 规则。组里只存名字，渲染时再落到节点，
@@ -868,6 +938,7 @@ fn parse_groups(lines: &[&str]) -> Vec<ProxyGroup> {
                 groups.push(ProxyGroup {
                     name: unquote(name.trim()),
                     kind: String::new(),
+                    interval: default_group_interval(),
                     members: Vec::new(),
                 });
                 continue;
@@ -880,7 +951,8 @@ fn parse_groups(lines: &[&str]) -> Vec<ProxyGroup> {
             }
             continue;
         }
-        // 组字段只认 `type:`，`url:` / `interval:` 之类直接忽略。
+        // 组字段认 `type:` 和 `interval:`，`url:` / `name:` 之类直接忽略。
+        // `interval:` 只对 url-test 组有意义（秒，写坏/没写都按缺省走）。
         let Some(current) = groups.last_mut() else {
             continue;
         };
@@ -892,8 +964,14 @@ fn parse_groups(lines: &[&str]) -> Vec<ProxyGroup> {
                 trimmed[..colon].trim(),
                 unquote(trimmed[colon + 1..].trim()),
             );
-            if key == "type" {
-                current.kind = value;
+            match key {
+                "type" => current.kind = value,
+                "interval" => {
+                    if let Ok(secs) = value.parse::<u64>() {
+                        current.interval = secs;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2860,6 +2938,73 @@ rules:
                 .route,
             Route::Node(sub.nodes[1].clone()),
             "us-1 更快，url-test 必须选它"
+        );
+    }
+
+    #[test]
+    fn groups_parse_interval_custom_or_default() {
+        let sub = parse_subscription(SAMPLE);
+        // 样例没写 interval，两个组都按缺省走。
+        assert_eq!(sub.groups[0].interval, super::DEFAULT_AUTO_INTERVAL_SECS);
+        assert_eq!(sub.groups[1].interval, super::DEFAULT_AUTO_INTERVAL_SECS);
+        let sub = parse_subscription(
+            "proxies:\n  - name: n1\n    type: vless\n    server: a.com\n    uuid: 4dfae26b-42b2-4c31-bed4-7836307a3986\nproxy-groups:\n  - name: auto\n    type: url-test\n    interval: 120\n    proxies:\n      - n1\n",
+        );
+        assert_eq!(sub.groups[0].interval, 120);
+        // 写坏的 interval 不炸，沿用缺省。
+        let sub = parse_subscription(
+            "proxies:\n  - name: n1\n    type: vless\n    server: a.com\n    uuid: 4dfae26b-42b2-4c31-bed4-7836307a3986\nproxy-groups:\n  - name: auto\n    type: url-test\n    interval: fast\n    proxies:\n      - n1\n",
+        );
+        assert_eq!(sub.groups[0].interval, super::DEFAULT_AUTO_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn stored_groups_without_interval_still_parse() {
+        // 老库 JSON 里没 interval 字段，反序列化必须按缺省补上，不断粮。
+        let group: super::ProxyGroup = serde_json::from_str(
+            r#"{"name":"auto","kind":"url-test","members":["n1"]}"#,
+        )
+        .expect("老数据能解析");
+        assert_eq!(group.interval, super::DEFAULT_AUTO_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn auto_test_nodes_dedup_and_interval_floor() {
+        let sub = parse_subscription(RULE_SAMPLE);
+        // RULE_SAMPLE 里没有自动组之外的重叠，auto 组两个节点都要测。
+        let nodes = super::auto_test_nodes(&sub);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(super::auto_test_interval_secs(&sub), super::DEFAULT_AUTO_INTERVAL_SECS);
+        // 多自动组取最小 interval，低于下限夹住；节点按名去重。
+        let mut sub2 = sub.clone();
+        sub2.groups.push(super::ProxyGroup {
+            name: "auto2".to_string(),
+            kind: "url-test".to_string(),
+            interval: 10,
+            members: vec!["sg-1".to_string()],
+        });
+        let nodes = super::auto_test_nodes(&sub2);
+        assert_eq!(nodes.len(), 2, "sg-1 重叠只测一次");
+        assert_eq!(
+            super::auto_test_interval_secs(&sub2),
+            super::AUTO_INTERVAL_FLOOR_SECS,
+            "10 秒太密，夹到下限"
+        );
+    }
+
+    #[test]
+    fn fastest_node_name_needs_measurement() {
+        let sub = parse_subscription(RULE_SAMPLE);
+        let auto = sub.groups.iter().find(|g| g.name == "auto").expect("有 auto 组");
+        let empty: HashMap<String, Option<u64>> = HashMap::new();
+        // 没测过不谎称最快，界面显示待测；路由兜底是另一回事。
+        assert_eq!(super::fastest_node_name(&sub, auto, &empty), None);
+        let mut latencies = HashMap::new();
+        latencies.insert("sg-1".to_string(), None);
+        latencies.insert("us-1".to_string(), Some(100));
+        assert_eq!(
+            super::fastest_node_name(&sub, auto, &latencies).as_deref(),
+            Some("us-1")
         );
     }
 

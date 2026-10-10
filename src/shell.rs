@@ -21,6 +21,33 @@ pub(crate) const TEXT_SM: f32 = 12.0;
 pub(crate) const TEXT_MD: f32 = 13.0;
 pub(crate) const TEXT_LG: f32 = 15.0;
 
+/// 网格卡片基准宽 + 间隙（逻辑像素）：列数按内容区实时宽度算，
+/// 各工具的卡片网格共用，保证每行撑满且不断行错位。
+const GRID_CARD_W: f32 = 232.0;
+const GRID_GAP: f32 = 8.0;
+/// 内容区左右内边距（工具页根 `px(16.)` 两边，列数公式里扣掉）。
+const PAGE_PAD_X: f32 = 32.0;
+
+/// 卡片网格布局：列数 + 网格定宽，一起算好往下传。
+/// 定宽必须显式给像素：flex 链默认不拉伸，`w_full` 的百分比较到不定宽
+/// 父级会退化成 auto，容器被内容挤小，轨道再怎么 1fr 也撑不满。
+/// 调用方把定宽直接设到网格上（`min_w_0` 照带，防超宽内容顶出去）。
+#[derive(Clone, Copy)]
+pub(crate) struct GridLayout {
+    /// 列数（2..=6）。
+    pub cols: u16,
+    /// 网格定宽（逻辑像素，等于内容区宽）。
+    pub width: f32,
+}
+
+/// 网格布局：按实时窗宽算（resize 即换），列数夹在 2..=6 之间，
+/// 定宽恒等于内容区宽（最小窗口两列不挤，超宽屏六列不空）。
+pub(crate) fn grid_layout(window: &Window) -> GridLayout {
+    let content = (window.bounds().size.width.as_f32() - SIDEBAR_W - PAGE_PAD_X).max(0.);
+    let cols = (((content + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as u16).clamp(2, 6);
+    GridLayout { cols, width: content }
+}
+
 /// 工具标识：导航、标题、图标都从它派生，保证三处不脱节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolId {
@@ -330,7 +357,7 @@ impl WsShell {
             }))
     }
 
-    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tool = &TOOLS[self.selected];
         let name = tool.id.name();
         let hint = tool.id.hint();
@@ -361,16 +388,16 @@ impl WsShell {
                     .child(div().text_size(px(TEXT_LG)).text_color(fg).child(name))
                     .child(div().text_size(px(TEXT_SM)).text_color(muted).child(hint)),
             )
-            .child(self.render_tool_body(tool, cx))
+            .child(self.render_tool_body(tool, window, cx))
     }
 
     /// 各工具的主体：设置页是真交互，其他工具暂时是空状态占位。
     /// 真工具落地时在这里加分支，每个分支调自己视图的渲染。
-    fn render_tool_body(&self, tool: &ToolDef, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tool_body(&self, tool: &ToolDef, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         match tool.id {
             ToolId::Screenshot => self.render_shot(cx).into_any_element(),
-            ToolId::Proxy => self.render_proxy(cx).into_any_element(),
-            ToolId::AiRelay => self.render_airelay(cx).into_any_element(),
+            ToolId::Proxy => self.render_proxy(window, cx).into_any_element(),
+            ToolId::AiRelay => self.render_airelay(window, cx).into_any_element(),
             ToolId::Settings => self.render_settings(cx).into_any_element(),
             _ => self.render_placeholder(tool, cx).into_any_element(),
         }
@@ -426,7 +453,7 @@ impl Render for WsShell {
                     .flex()
                     .flex_1()
                     .child(self.render_sidebar(cx))
-                    .child(self.render_content(cx)),
+                    .child(self.render_content(window, cx)),
             )
     }
 }

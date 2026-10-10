@@ -117,6 +117,15 @@ app:
   proxy_tag_auto:
     en: Auto
     zh-CN: 自动
+  proxy_auto_badge:
+    en: Auto
+    zh-CN: 自动
+  proxy_auto_idle:
+    en: Awaiting auto test
+    zh-CN: 待自动测
+  proxy_auto_locked:
+    en: Auto-selected, manual pick ignored
+    zh-CN: 自动选择中，手动点选无效
   proxy_manual_title:
     en: Manual rules
     zh-CN: 手动规则

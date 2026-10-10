@@ -17,9 +17,6 @@ use crate::shell::{TEXT_MD, TEXT_SM, WsShell};
 /// 模型标签和日志列表的最大高度：超了内部滚，不把整页撑爆。
 const LIST_MAX_H: f32 = 220.0;
 
-/// 模型卡片宽（和代理节点卡同尺寸，一行摆两到三张）。
-const CARD_W: f32 = 232.0;
-
 /// 请求表 delegate：列固定 6 列，行是展示字符串 + 置灰旗。
 /// 数据由心跳重建（见 `refresh_req_table`），`render_td` 只读不算。
 struct ReqTableRow {
@@ -163,7 +160,9 @@ impl WsShell {
     /// AI 转发工具页：开关行 + 端口行 +（模型 / 请求）双页。
     /// 网关启停走后台线程（端口占用立刻报错），日志靠 1 秒心跳刷，
     /// 切到请求页也即刷一次（没开网关时心跳没有，表会是空的）。
-    pub(crate) fn render_airelay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_airelay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 卡片网格布局按实时窗宽算，保证每行撑满。
+        let grid = crate::shell::grid_layout(window);
         div()
             .flex()
             .flex_1()
@@ -197,7 +196,7 @@ impl WsShell {
             )
             .child(match self.airelay.tab {
                 1 => self.render_airelay_log(cx).into_any_element(),
-                _ => self.render_airelay_models(cx).into_any_element(),
+                _ => self.render_airelay_models(grid, cx).into_any_element(),
             })
             .children(self.airelay.status.clone().map(|s| {
                 div()
@@ -437,7 +436,8 @@ impl WsShell {
 
     /// 模型页：卡片单选，开着读实时目录（兜底标出来），没开用内置表。
     /// 永远强制改写，没有跟随模式。行一般十来个，封顶高度超了内部滚。
-    fn render_airelay_models(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 网格等列撑满整行（布局调用方按窗宽算好传进来）。
+    fn render_airelay_models(&self, grid: crate::shell::GridLayout, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let (models, live) = self.airelay.model_list();
         // “实时” / “兜底”
@@ -513,13 +513,15 @@ impl WsShell {
             .collect();
         column = column.child(
             div().max_h(px(LIST_MAX_H)).overflow_y_scrollbar().child(
-                div().flex().flex_wrap().gap(px(8.)).children(cards),
+                // 网格定宽铺满：当 flex 孩子会被内容挤成 max-content，
+                // 定死像素宽度（调用方按内容区算好）+ 最小 0，轨道才按 1fr 均分整行。
+                div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0().children(cards),
             ),
         );
         column
     }
 
-    /// 模型卡片：选中铺底色描边（代理节点卡同款）。
+    /// 模型卡片：选中铺底色描边（代理节点卡同款），网格等列撑满。
     /// 点即换：持久化 + 开着直接热换到网关，不用重启。
     fn model_card(&self, ix: usize, model: String, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let fg = cx.theme().foreground;
@@ -540,8 +542,7 @@ impl WsShell {
         let title = format!("{model}{tag}");
         div()
             .id(ElementId::named_usize("airelay-model", ix))
-            .flex_none()
-            .w(px(CARD_W))
+            // 网格孩子：轨道定宽，不设 flex 和定宽（设了会被轨道覆盖，还乱换行）。
             .px(px(10.))
             .py(px(8.))
             .rounded(px(6.))

@@ -2436,6 +2436,7 @@ mod tests {
             groups: vec![ProxyGroup {
                 name: "新加坡".to_string(),
                 kind: "select".to_string(),
+                interval: crate::tools::proxy::DEFAULT_AUTO_INTERVAL_SECS,
                 members: vec![
                     "新加坡Oracle1-1-c37b9".to_string(),
                     "新加坡Oracle1-2-076aa".to_string(),

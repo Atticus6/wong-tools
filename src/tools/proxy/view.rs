@@ -76,6 +76,14 @@ pub(crate) struct ProxyView {
     live: Option<crate::tools::proxy::LiveRouting>,
     latencies: HashMap<String, Option<u64>>,
     testing: bool,
+    /// 自动选择后台循环是否正在测：和手动 `testing` 分开，互不挡路。
+    /// 手动测速/拉订阅时自动轮跳过本轮，自动测时手动按钮照点。
+    auto_testing: bool,
+    /// 上轮自动测速结束的 Unix 毫秒：组头换算“几分钟前”，没跑过是 None。
+    last_auto_test_ms: Option<u64>,
+    /// 自动循环代次：启停各加一，老循环发现代次对不上就退，
+    /// 免得重启后两条循环叠着测。
+    auto_gen: u64,
     status: Option<String>,
     busy: bool,
 }
@@ -230,6 +238,9 @@ impl ProxyView {
             live: None,
             latencies: HashMap::new(),
             testing: false,
+            auto_testing: false,
+            last_auto_test_ms: None,
+            auto_gen: 0,
             status: None,
             busy: false,
         };
@@ -285,6 +296,12 @@ impl ProxyView {
         ))
     }
 
+    /// 某自动组当前最快节点名：没测过是 None（组头显示待测，不乱指）。
+    /// 只看实测延迟，不看手动选中（分流本来就无视它）。
+    fn auto_fastest(&self, group: &crate::tools::proxy::ProxyGroup) -> Option<String> {
+        crate::tools::proxy::fastest_node_name(&self.subscription, group, &self.latencies)
+    }
+
     /// 自检兜底用的主节点：按组顺序找第一个能落到节点的组选择，
     /// 组要是选了 `DIRECT` 之流就往下找，都没有返回 None（调用方提示拉订阅）。
     fn primary_node(&self) -> Option<crate::tools::proxy::ProxyNode> {
@@ -306,7 +323,9 @@ impl WsShell {
     /// 代理工具页：三个标签（代理 / 订阅 / 规则）+ 共用的状态行。
     /// 拉取和测速都走后台线程（订阅 4MB 级别，主线程跑会卡住界面）。
     /// 分流查询 8 万条全扫几毫秒，直接 UI 线程算。
-    pub(crate) fn render_proxy(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_proxy(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 卡片网格布局按实时窗宽算，保证每行撑满。
+        let grid = crate::shell::grid_layout(window);
         let muted = cx.theme().muted_foreground;
         div()
             .flex()
@@ -339,7 +358,7 @@ impl WsShell {
                 1 => self.render_proxy_sub(cx).into_any_element(),
                 2 => self.render_proxy_rules(cx).into_any_element(),
                 3 => self.render_proxy_conns(cx).into_any_element(),
-                _ => self.render_proxy_main(cx).into_any_element(),
+                _ => self.render_proxy_main(grid, cx).into_any_element(),
             })
             .children(self.proxy.status.clone().map(|s| {
                 div()
@@ -689,7 +708,7 @@ impl WsShell {
 
     /// “代理”标签：开关行 + 节点卡片网格（面板站风格：名 + 延迟）。
     /// 整列能压到 0 高，里面的滚动区才有机会滚而不是把页面撑爆。
-    fn render_proxy_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_proxy_main(&self, grid: crate::shell::GridLayout, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_1()
@@ -697,7 +716,7 @@ impl WsShell {
             .flex_col()
             .gap(px(12.))
             .child(self.render_proxy_controls(cx))
-            .child(self.render_proxy_grid(cx))
+            .child(self.render_proxy_grid(grid, cx))
     }
 
     /// 订阅行：“订阅地址”标签 + 地址框 + 更新按钮。
@@ -1360,9 +1379,9 @@ impl WsShell {
     /// 节点网格：有分组按订阅的组分节（组头 + 成员卡片，面板站同款），
     /// 没分组退化成扁平列表。成员三种卡：节点卡（可点可测）、关键字卡
     /// （`DIRECT` / `REJECT`，纯展示）、嵌套组卡（纯展示）。
-    fn render_proxy_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_proxy_grid(&self, grid: crate::shell::GridLayout, cx: &mut Context<Self>) -> impl IntoElement {
         if self.proxy.subscription.groups.is_empty() {
-            return self.render_proxy_flat_grid(cx).into_any_element();
+            return self.render_proxy_flat_grid(grid, cx).into_any_element();
         }
         // 卡片 id 要全局唯一：组号和组内序号拼起来（节点和组都远少于一万）。
         const ID_SPAN: usize = 10_000;
@@ -1374,18 +1393,35 @@ impl WsShell {
             let has_nodes = members.iter().any(|member| {
                 matches!(member, crate::tools::proxy::GroupMember::Node(_))
             });
+            // 自动组（url-test）高亮只看实测最快，不看手动选中：
+            // 分流本来就无视它的选择，照着选中态点是误导。
+            let auto = crate::tools::proxy::is_auto_group(group);
+            let fastest = auto.then(|| self.proxy.auto_fastest(group)).flatten();
             let cards: Vec<AnyElement> = members
             .iter()
             .enumerate()
             .map(|(mi, member)| match member {
-                crate::tools::proxy::GroupMember::Node(node) => self
+                crate::tools::proxy::GroupMember::Node(node) => {
+                    if auto {
+                        let picked = fastest.as_deref().is_some_and(|name| name == node.name);
+                        return self
+                            .render_auto_node_card(
+                                node,
+                                ElementId::named_usize("proxy-node", gi * ID_SPAN + mi),
+                                picked,
+                                cx,
+                            )
+                        .into_any_element();
+                    }
+                    self
                     .render_node_card(
                         node,
                         ElementId::named_usize("proxy-node", gi * ID_SPAN + mi),
                         Some(group.name.clone()),
                         cx,
                     )
-                    .into_any_element(),
+                    .into_any_element()
+                }
                 crate::tools::proxy::GroupMember::Keyword(word) => {
                     let picked = self
                         .proxy
@@ -1422,10 +1458,25 @@ impl WsShell {
                 continue;
             }
             // 组头：组名 + 类型 + 张数（类型为空就不占位置），
+            // 自动组再跟当前最快和上轮时间，一眼看出自动选择有没有在干活；
             // 右边是本组测速按钮（只测组内节点）。
             let mut header = format!("{} ({})", group.name, cards.len());
             if !group.kind.is_empty() {
                 header = format!("{} · {} ({})", group.name, group.kind, cards.len());
+            }
+            if auto {
+                // “自动” / “未自动测”
+                let fastest_text = fastest.clone().unwrap_or("–".to_string());
+                let age_text = match self.proxy.last_auto_test_ms {
+                    Some(stamp) => crate::tools::proxy::format_age(
+                        crate::tools::proxy::unix_millis_now().saturating_sub(stamp),
+                    ),
+                    None => t("app.proxy_auto_idle"),
+                };
+                header = format!(
+                    "{header} · {}→{fastest_text} · {age_text}",
+                    t("app.proxy_auto_badge")
+                );
             }
             let muted = cx.theme().muted_foreground;
             let group_name = group.name.clone();
@@ -1460,7 +1511,11 @@ impl WsShell {
                                     .into_any_element()
                             })),
                     )
-                    .child(div().flex().flex_wrap().gap(px(8.)).children(cards))
+                    .child(
+                        // 网格定宽铺满：当 flex 孩子会被内容挤成 max-content，
+                        // 定死像素宽度（调用方按内容区算好）+ 最小 0，轨道才按 1fr 均分整行。
+                        div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0().children(cards),
+                    )
                     .into_any_element(),
             );
         }
@@ -1474,7 +1529,8 @@ impl WsShell {
     }
 
     /// 没分组的订阅退化成扁平列表（老样子）。
-    fn render_proxy_flat_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 网格等列撑满整行（布局调用方按窗宽算好传进来）。
+    fn render_proxy_flat_grid(&self, grid: crate::shell::GridLayout, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let count = self.proxy.subscription.nodes.len();
         let cards: Vec<AnyElement> = self
@@ -1518,9 +1574,11 @@ impl WsShell {
                     .overflow_y_scrollbar()
                     .child(
                         div()
-                            .flex()
-                            .flex_wrap()
+                            .grid()
+                            .grid_cols(grid.cols)
                             .gap(px(8.))
+                            .w(px(grid.width))
+                            .min_w_0()
                             .children(cards),
                     ),
             )
@@ -1528,6 +1586,7 @@ impl WsShell {
     }
 
     /// 节点卡：左名（超长省略）右延迟，选中铺底色描边。
+    /// 网格等列撑满，卡片不定宽（轨道定宽）。
     /// `group` 有值时高亮走该组的独立选中；扁平页没有组，不高亮。
     fn render_node_card(
         &self,
@@ -1581,8 +1640,7 @@ impl WsShell {
         let select_name = node.name.clone();
         div()
             .id(id)
-            .flex_none()
-            .w(px(232.))
+            // 网格孩子：轨道定宽，不设 flex 和定宽。
             .px(px(10.))
             .py(px(8.))
             .rounded(px(6.))
@@ -1638,6 +1696,90 @@ impl WsShell {
             )
     }
 
+    /// 自动组节点卡：左名（超长省略）右延迟，和手动卡同一样式；
+    /// 高亮只看实测最快（调用方算好 `picked` 传进来），不看手动选中。
+    /// 点击不切选择（分流本来就无视它，切了是误导），只提示自动接管。
+    /// 没测过时都不高亮，等首轮跑完自然有数。
+    fn render_auto_node_card(
+        &self,
+        node: &crate::tools::proxy::ProxyNode,
+        id: ElementId,
+        picked: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let fg = cx.theme().foreground;
+        let border = cx.theme().border;
+        let link = cx.theme().link;
+        let row_bg = cx.theme().sidebar_accent;
+        let green = cx.theme().green;
+        let blue = cx.theme().blue;
+        let red = cx.theme().red;
+        let (bg, edge) = if picked {
+            (row_bg, link)
+        } else {
+            (hsla(0., 0., 0., 0.), border)
+        };
+        let latency = self.proxy.latencies.get(&node.name).copied();
+        let (tone_text, tone_color) = match latency {
+            Some(Some(ms)) => {
+                let color = match crate::tools::proxy::latency_tone(Some(ms)) {
+                    crate::tools::proxy::LatencyTone::Fast => green,
+                    crate::tools::proxy::LatencyTone::Normal => blue,
+                    _ => red,
+                };
+                (ms.to_string(), color)
+            }
+            // 测出来是超时：灰字“超时”。
+            Some(None) => (t("app.proxy_timeout"), muted),
+            // 还没测：灰色横线占位。
+            None => ("–".to_string(), muted),
+        };
+        let name = node.name.clone();
+        // “自动选择中，手动点选无效”
+        let locked = t("app.proxy_auto_locked");
+        div()
+            .id(id)
+            // 网格孩子：轨道定宽，不设 flex 和定宽。
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(edge)
+            .bg(bg)
+            .cursor_pointer()
+            .hover(move |s| {
+                if picked { s } else { s.bg(row_bg) }
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.proxy.status = Some(locked.clone());
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(TEXT_MD))
+                            .text_color(fg)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(TEXT_SM))
+                            .text_color(tone_color)
+                            .child(tone_text),
+                    ),
+            )
+    }
+
     /// 展示卡：关键字（`DIRECT` / `REJECT`）和嵌套组名用它，可点，
     /// 点即把该组切到它（分流认这个选择，照样持久化）。
     fn render_tag_card(
@@ -1662,8 +1804,7 @@ impl WsShell {
         let pick_label = label.clone();
         div()
             .id(id)
-            .flex_none()
-            .w(px(232.))
+            // 网格孩子：轨道定宽，不设 flex 和定宽。
             .px(px(10.))
             .py(px(8.))
             .rounded(px(6.))
@@ -1700,12 +1841,80 @@ impl WsShell {
             )
     }
 
+    /// 自动选择循环：只测自动组（url-test）节点，每轮取延迟最低的，
+    /// 结果并入延迟表后刷新活表，url-test 下个连接即用新的。
+    /// 首轮等几秒（隧道先稳），之后按订阅最小 interval；
+    /// 手动测速/拉订阅时跳过本轮不硬挤。停隧道、关窗口、重启（代次变）
+    /// 都自己退，不跟新循环叠着测。状态行不刷屏，组头看最快和时间。
+    fn spawn_auto_test_loop(&mut self, cx: &mut Context<Self>) {
+        use crate::tools::proxy::AUTO_TEST_INITIAL_DELAY;
+        let gen = self.proxy.auto_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AUTO_TEST_INITIAL_DELAY).await;
+            loop {
+                // 本轮计划：订阅刷新了下轮即生效（节点和间隔都现读）。
+                let plan = cx.update(|cx| {
+                    this.update(cx, |view, _| {
+                        let alive = view.proxy.running.is_some() && view.proxy.auto_gen == gen;
+                        let skip = view.proxy.busy
+                            || view.proxy.testing
+                            || view.proxy.auto_testing;
+                        let nodes =
+                            crate::tools::proxy::auto_test_nodes(&view.proxy.subscription);
+                        let secs =
+                            crate::tools::proxy::auto_test_interval_secs(&view.proxy.subscription);
+                        (alive, skip, nodes, secs)
+                    })
+                    .unwrap_or((false, true, Vec::new(), 300))
+                });
+                let (alive, skip, nodes, secs) = plan;
+                if !alive {
+                    break;
+                }
+                if !skip && !nodes.is_empty() {
+                    let _ = cx.update(|cx| {
+                        let _ = this.update(cx, |view, cx| {
+                            view.proxy.auto_testing = true;
+                            cx.notify();
+                        });
+                    });
+                    let results = cx
+                        .background_executor()
+                        .spawn(async move { crate::tools::proxy::measure_all(&nodes) })
+                        .await;
+                    let done = cx.update(|cx| {
+                        this.update(cx, |view, cx| {
+                            view.proxy.auto_testing = false;
+                            view.proxy.latencies.extend(results);
+                            view.proxy.last_auto_test_ms =
+                                Some(crate::tools::proxy::unix_millis_now());
+                            // 延迟变了，url-test 下个连接就要新结果，顺手刷新活表。
+                            view.refresh_live_routing();
+                            cx.notify();
+                        })
+                        .is_ok()
+                    });
+                    if !done {
+                        break;
+                    }
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(secs))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
     /// 停止隧道：掐监听线程 + 关系统代理 + 清活表落旗。
     /// 开关按钮和搜索面板共用，行为一致。
     pub(crate) fn proxy_tunnel_stop(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.proxy.running.take() {
             handle.stop();
         }
+        // 代次加一：自动循环下轮看到对不上就退，不跟新循环叠着测。
+        self.proxy.auto_gen += 1;
+        self.proxy.auto_testing = false;
         // 搜索面板的启停行看这个缓存（开面板时同步读，渲染里不再碰主窗口）。
         self.spotlight.proxy_running = false;
         // 活表一起扔：下次启动建新的，旧快照不复活。
@@ -1770,6 +1979,10 @@ impl WsShell {
                         self.proxy.live = Some(live);
                         // 搜索面板的启停行看这个缓存（开面板时同步读）。
                         self.spotlight.proxy_running = true;
+                        // 自动循环代次加一，老循环（如果有）下轮即退，
+                        // 新循环拿当前代次，只认自己那一代。
+                        self.proxy.auto_gen += 1;
+                        self.spawn_auto_test_loop(cx);
                         // 连接表心跳：1 秒刷一次速度和时间，开着才跳，
                         // 停了自己退（running 没了就 break）。
                         cx.spawn(async move |this, cx| {
