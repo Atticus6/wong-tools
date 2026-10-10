@@ -146,9 +146,12 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 ## 卡片网格布局规范（模型 / 节点卡片）
 
 - 版式：`div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0()`，
-  布局经 `crate::shell::grid_layout(window, collapsed)` 拿（`GridLayout { cols, width }`）：
+  布局经 `crate::shell::grid_layout(window, sidebar_w)` 拿（`GridLayout { cols, width }`）：
   列数按实时窗宽 `(内容区 + 8) / (232 + 8)` 夹 2..=6，定宽恒等于内容区宽
   （窗宽 − 侧边（216，收起 52）− 32 页边距），resize/收起即换。
+  侧边栏宽是动画采样值：`render` 里一帧只采一次（`sidebar_width`），
+  sidebar 和网格共用，收起/展开时卡片跟着走（目标驱动 spring，
+  连点反转不断，见 https://gpui-kit.com/docs/animation/）。
 - 卡片本体不设 flex 和定宽（轨道定宽，设了会被覆盖还乱换行）；
   `window` 从 `render` 经 `render_content` / `render_tool_body` 往下传到网格。
 - 宽表（请求 / 连接 DataTable）同理在链上加 `min_w_0`，表格被夹出确定宽度，

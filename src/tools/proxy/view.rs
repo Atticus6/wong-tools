@@ -324,9 +324,14 @@ impl WsShell {
     /// 代理工具页：三个标签（代理 / 订阅 / 规则）+ 共用的状态行。
     /// 拉取和测速都走后台线程（订阅 4MB 级别，主线程跑会卡住界面）。
     /// 分流查询 8 万条全扫几毫秒，直接 UI 线程算。
-    pub(crate) fn render_proxy(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_proxy(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        sidebar_w: f32,
+    ) -> impl IntoElement {
         // 卡片网格布局按实时窗宽算，保证每行撑满。
-        let grid = crate::shell::grid_layout(window, self.sidebar_collapsed);
+        let grid = crate::shell::grid_layout(window, sidebar_w);
         let muted = cx.theme().muted_foreground;
         div()
             .flex()

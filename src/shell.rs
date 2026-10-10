@@ -3,6 +3,7 @@
 //! 这里按 `TOOLS` 分发。跨模块调的都走 `pub(crate)`，别放出去。
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::spring;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::*;
@@ -44,16 +45,32 @@ pub(crate) struct GridLayout {
 
 /// 网格布局：按实时窗宽算（resize 即换），列数夹在 2..=6 之间，
 /// 定宽恒等于内容区宽（最小窗口两列不挤，超宽屏六列不空）。
-/// 侧边栏收起时内容区变宽，调用方把外壳的收起态传进来一起算。
-pub(crate) fn grid_layout(window: &Window, collapsed: bool) -> GridLayout {
-    let sidebar_w = if collapsed {
+/// 侧边栏宽传动画采样值（`render` 里一帧只采一次）：收起/展开时卡片
+/// 跟着侧边栏一起走，不用等落点再跳。
+pub(crate) fn grid_layout(window: &Window, sidebar_w: f32) -> GridLayout {
+    let content = (window.bounds().size.width.as_f32() - sidebar_w - PAGE_PAD_X).max(0.);
+    let cols = (((content + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as u16).clamp(2, 6);
+    GridLayout { cols, width: content }
+}
+
+/// 侧边栏宽动画采样：目标由收起态定，连点反转靠 spring 保位置和速度
+/// （目标驱动，不是 one-shot，见官方 animation 文档）；减弱动态下直接
+/// 落目标，不请求多余帧。首帧直接采用目标，启动不播入场。
+/// 通道 `"sidebar-width"` 一帧只在这里采一次，sidebar 和网格共用返回值——
+/// 同一通道一帧多采会互相覆盖 retained 的位置/速度。
+pub(crate) fn sidebar_width(window: &mut Window, cx: &mut App, collapsed: bool) -> f32 {
+    let target = if collapsed {
         SIDEBAR_COLLAPSED_W
     } else {
         SIDEBAR_W
     };
-    let content = (window.bounds().size.width.as_f32() - sidebar_w - PAGE_PAD_X).max(0.);
-    let cols = (((content + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as u16).clamp(2, 6);
-    GridLayout { cols, width: content }
+    spring(
+        "sidebar-width",
+        target,
+        cx.theme().motion_tokens().spring_move,
+        window,
+        cx,
+    )
 }
 
 /// 工具标识：导航、标题、图标都从它派生，保证三处不脱节。
@@ -420,7 +437,7 @@ impl WsShell {
             })
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, sidebar_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.sidebar_collapsed;
         let sidebar_bg = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
@@ -432,11 +449,7 @@ impl WsShell {
             .flex_none()
             .flex()
             .flex_col()
-            .w(px(if collapsed {
-                SIDEBAR_COLLAPSED_W
-            } else {
-                SIDEBAR_W
-            }))
+            .w(px(sidebar_w))
             .h_full()
             .bg(sidebar_bg)
             .border_r_1()
@@ -492,7 +505,12 @@ impl WsShell {
             }))
     }
 
-    fn render_content(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        sidebar_w: f32,
+    ) -> impl IntoElement {
         let tool = &TOOLS[self.selected];
         let name = tool.id.name();
         let hint = tool.id.hint();
@@ -523,16 +541,22 @@ impl WsShell {
                     .child(div().text_size(px(TEXT_LG)).text_color(fg).child(name))
                     .child(div().text_size(px(TEXT_SM)).text_color(muted).child(hint)),
             )
-            .child(self.render_tool_body(tool, window, cx))
+            .child(self.render_tool_body(tool, window, cx, sidebar_w))
     }
 
     /// 各工具的主体：设置页是真交互，其他工具暂时是空状态占位。
     /// 真工具落地时在这里加分支，每个分支调自己视图的渲染。
-    fn render_tool_body(&self, tool: &ToolDef, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tool_body(
+        &self,
+        tool: &ToolDef,
+        window: &Window,
+        cx: &mut Context<Self>,
+        sidebar_w: f32,
+    ) -> impl IntoElement {
         match tool.id {
             ToolId::Screenshot => self.render_shot(cx).into_any_element(),
-            ToolId::Proxy => self.render_proxy(window, cx).into_any_element(),
-            ToolId::AiRelay => self.render_airelay(window, cx).into_any_element(),
+            ToolId::Proxy => self.render_proxy(window, cx, sidebar_w).into_any_element(),
+            ToolId::AiRelay => self.render_airelay(window, cx, sidebar_w).into_any_element(),
             ToolId::Settings => self.render_settings(cx).into_any_element(),
             _ => self.render_placeholder(tool, cx).into_any_element(),
         }
@@ -568,6 +592,8 @@ impl Render for WsShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
+        // 侧边栏宽一帧采一次：sidebar 和内容区网格共用，动画全程对齐。
+        let sidebar_w = sidebar_width(window, cx, self.sidebar_collapsed);
 
         div()
             .flex()
@@ -587,8 +613,8 @@ impl Render for WsShell {
                 div()
                     .flex()
                     .flex_1()
-                    .child(self.render_sidebar(cx))
-                    .child(self.render_content(window, cx)),
+                    .child(self.render_sidebar(sidebar_w, cx))
+                    .child(self.render_content(window, cx, sidebar_w)),
             )
     }
 }

@@ -160,9 +160,14 @@ impl WsShell {
     /// AI 转发工具页：开关行 + 端口行 +（模型 / 请求）双页。
     /// 网关启停走后台线程（端口占用立刻报错），日志靠 1 秒心跳刷，
     /// 切到请求页也即刷一次（没开网关时心跳没有，表会是空的）。
-    pub(crate) fn render_airelay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_airelay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        sidebar_w: f32,
+    ) -> impl IntoElement {
         // 卡片网格布局按实时窗宽算，保证每行撑满。
-        let grid = crate::shell::grid_layout(window, self.sidebar_collapsed);
+        let grid = crate::shell::grid_layout(window, sidebar_w);
         div()
             .flex()
             .flex_1()
