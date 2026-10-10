@@ -45,6 +45,15 @@ impl WsShell {
                 self.hotkey_rows(cx),
                 cx,
             ))
+            // “更新”分组
+            .child(self.settings_section(
+                // “更新”
+                t("app.update_title"),
+                // “启动自动检查一次”
+                t("app.update_hint"),
+                self.update_rows(cx),
+                cx,
+            ))
     }
 
     /// 设置页的一组：标题 + 副提示 + 若干选项行。
@@ -245,6 +254,108 @@ impl WsShell {
         rows
     }
 
+    /// “更新”分组：当前版本 + 状态 + 检查按钮；有新版再给一行下载入口，
+    /// 失败原因另起一行（标题栏只在有新版时亮灯，失败不打扰）。
+    fn update_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use gpui_kit::component::button::Button;
+        use gpui_kit::component::Sizable as _;
+
+        let fg = cx.theme().foreground;
+        let red = cx.theme().red;
+        let mut rows = vec![
+            div()
+                .id("update-row")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .h(px(32.))
+                .rounded(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(TEXT_MD))
+                        .text_color(fg)
+                        .child(format!(
+                            "v{} · {}",
+                            crate::updater::CURRENT_VERSION,
+                            self.update_status_text()
+                        )),
+                )
+                .child(
+                    Button::new("update-check")
+                        // “检查更新”
+                        .label(t("app.update_check"))
+                        .small()
+                        .outline()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.check_update(cx);
+                        })),
+                )
+                .into_any_element(),
+        ];
+        // 有新版：下载页入口行（标题栏图标是主入口，这里再给一行）。
+        if let crate::updater::UpdateState::Available { version, .. } = &self.update {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .h(px(32.))
+                    .rounded(px(6.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(TEXT_MD))
+                            .text_color(fg)
+                            // “发现新版本 v0.1.2”
+                            .child(format!("{} v{version}", t("app.update_available"))),
+                    )
+                    .child(
+                        Button::new("update-open")
+                            // “前往下载”
+                            .label(t("app.update_download"))
+                            .small()
+                            .outline()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_update_page(cx);
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // 检查失败：原因红字另起一行，下次启动或手动重试。
+        if let crate::updater::UpdateState::Failed(error) = &self.update {
+            rows.push(
+                div()
+                    .text_size(px(TEXT_SM))
+                    .text_color(red)
+                    .child(format!("{}：{error}", t("app.update_failed")))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    /// 更新状态行文案：版本号在代码里拼，key 只管固定词。
+    fn update_status_text(&self) -> String {
+        match &self.update {
+            crate::updater::UpdateState::Idle => t("app.update_idle"),
+            crate::updater::UpdateState::Checking => t("app.update_checking"),
+            crate::updater::UpdateState::UpToDate => t("app.update_latest"),
+            crate::updater::UpdateState::Available { version, .. } => {
+                format!("{} v{version}", t("app.update_available"))
+            }
+            crate::updater::UpdateState::Failed(error) => {
+                format!("{}：{error}", t("app.update_failed"))
+            }
+        }
+    }
     /// “主题”分组：全部内置主题，一行一个，中文名见 themes/wong.json。
     fn theme_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         crate::theme::names()

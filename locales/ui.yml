@@ -12,6 +12,36 @@ app:
   sidebar_expand:
     en: Expand sidebar
     zh-CN: 展开侧边栏
+  update_title:
+    en: Update
+    zh-CN: 更新
+  update_hint:
+    en: Checks once at startup
+    zh-CN: 启动自动检查一次
+  update_check:
+    en: Check for updates
+    zh-CN: 检查更新
+  update_checking:
+    en: Checking…
+    zh-CN: 正在检查…
+  update_idle:
+    en: Not checked yet
+    zh-CN: 尚未检查
+  update_latest:
+    en: Up to date
+    zh-CN: 已是最新
+  update_available:
+    en: New version available
+    zh-CN: 发现新版本
+  update_open_page:
+    en: Click to open download page
+    zh-CN: 点击前往下载
+  update_download:
+    en: Download
+    zh-CN: 前往下载
+  update_failed:
+    en: Update check failed
+    zh-CN: 检查失败
   tool_welcome:
     en: Welcome
     zh-CN: 欢迎

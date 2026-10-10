@@ -176,6 +176,8 @@ pub struct WsShell {
     /// 侧边栏收起态：随手持久化（`sidebar_collapsed`），启动恢复；
     /// 收起时只剩图标列，网格布局按窄栏重算。
     pub(crate) sidebar_collapsed: bool,
+    /// 更新检查状态：启动查一次 + 设置页可手查；有新版标题栏右上亮图标。
+    pub(crate) update: crate::updater::UpdateState,
     pub(crate) settings_theme: String,
     /// 主窗口句柄：搜索面板执行完把主窗拉回前台用（最小化也要还原）。
     /// 构造期只记 id，不读窗口几何（那时 `bounds()` 不可靠，句柄不受影响）。
@@ -189,13 +191,15 @@ pub struct WsShell {
 impl WsShell {
     /// 创建外壳。各工具的状态在自己模块里建（要 `window` 和 `cx`）。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
+        let mut this = Self {
             // 上次选中的工具：序号越界（工具增删）回落欢迎页。
             selected: crate::settings::selected_tool()
                 .filter(|ix| *ix < TOOLS.len())
                 .unwrap_or(0),
             // 侧边栏收起态：没存过回落展开。
             sidebar_collapsed: crate::settings::sidebar_collapsed().unwrap_or(false),
+            // 更新检查从 Idle 起，扔后台，回来写状态。
+            update: crate::updater::UpdateState::Idle,
             // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
             settings_theme: crate::theme::selected(),
             main_window: window.window_handle(),
@@ -203,7 +207,10 @@ impl WsShell {
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
             spotlight: crate::spotlight::SpotlightView::new(cx),
             airelay: crate::tools::airelay::view::AiRelayView::new(window, cx),
-        }
+        };
+        // 启动查一次新版：后台跑，失败静默（标题栏不亮灯，设置页可手查）。
+        this.check_update(cx);
+        this
     }
 
     /// 侧边栏选中并持久化：导航点击和搜索面板跳转共用，行为一致。
@@ -223,6 +230,66 @@ impl WsShell {
             eprintln!("存侧边栏收起态失败: {e}");
         }
         cx.notify();
+    }
+
+    /// 查新版（启动调一次 + 设置页手动）：防重入，网络活扔后台，
+    /// 回来写状态 + 重绘。失败只记状态，界面照常能用。
+    pub(crate) fn check_update(&mut self, cx: &mut Context<Self>) {
+        // 正在查就别叠：GitHub 未登录限流 60 次/小时，省着点。
+        if matches!(self.update, crate::updater::UpdateState::Checking) {
+            return;
+        }
+        self.update = crate::updater::UpdateState::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    match crate::updater::check_latest() {
+                        Err(e) => crate::updater::UpdateState::Failed(e),
+                        Ok(latest) => {
+                            if crate::updater::is_newer(
+                                &latest.version,
+                                crate::updater::CURRENT_VERSION,
+                            ) {
+                                crate::updater::UpdateState::Available {
+                                    version: latest.version,
+                                    url: latest.url,
+                                }
+                            } else {
+                                crate::updater::UpdateState::UpToDate
+                            }
+                        }
+                    }
+                })
+                .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |view, cx| {
+                    view.update = outcome;
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// 打开下载页（标题栏图标 / 设置页入口）：浏览器拉起 Release 页，
+    /// 装不装用户在那边定。拉起失败只记日志，状态不动（下载页还在）。
+    pub(crate) fn open_update_page(&self, cx: &mut Context<Self>) {
+        let url = match &self.update {
+            crate::updater::UpdateState::Available { url, .. } => url.clone(),
+            _ => return,
+        };
+        cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::updater::open_release_page(&url) })
+                .await;
+            if let Err(e) = result {
+                eprintln!("打开下载页失败: {e}");
+            }
+        })
+        .detach();
     }
 
     fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -314,6 +381,31 @@ impl WsShell {
             })
             // 品牌和标题栏按钮之间的弹性拖拽区。
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
+            // 有新版才亮更新图标：ghost 下载箭头，hover 报版本号，点即跳下载页。
+            .children(match &self.update {
+                crate::updater::UpdateState::Available { version, .. } => {
+                    // “发现新版本 v0.1.2，点击前往下载”
+                    let tip = format!(
+                        "{} v{version}，{}",
+                        t("app.update_available"),
+                        t("app.update_open_page")
+                    );
+                    vec![
+                        Button::new("app-update")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Download).size(px(14.)))
+                            .tooltip(tip.clone())
+                            .accessibility_label(tip)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_update_page(cx);
+                            }))
+                            .into_any_element(),
+                    ]
+                }
+                _ => Vec::new(),
+            })
             // macOS 用系统红绿灯（左上），右侧不画 Windows 按钮；
             // Windows 才要 8px 间隔 + 三个贴边按钮。
             .children(if is_mac {

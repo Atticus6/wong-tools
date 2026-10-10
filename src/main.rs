@@ -16,6 +16,7 @@ mod spotlight;
 mod telemetry;
 mod theme;
 mod tools;
+mod updater;
 
 use std::borrow::Cow;
 

@@ -55,6 +55,11 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   事件吃掉，不双跳。按键录制用 `capture_key_down` 读 `Keystroke` 现拼原文。
 - `src/shell.rs`——只剩框架：`WsShell`（字段 `pub(crate)`）、`TOOLS`、
   标题栏/侧边栏/分发、`Drop` 兜底。工具视图和设置页视图不在这。
+- `src/updater/`——自动更新检查（不是侧边栏工具）：启动查一次 GitHub
+  最新 Release（`ureq` 阻塞跑后台线程），有新版标题栏右上亮下载图标，
+  点即浏览器跳 Release 页。按官方 auto-update 归属表只查不装：
+  Inno/DMG/deb 的安装归各平台安装程序管，绝不自替换二进制。
+  版本比较只认数字三元组，`parse_version`/`is_newer` 单测覆盖。
 - `src/tools/screenshot/mod.rs`——纯逻辑，不碰 GPUI：xcap 截主显示器
   （GDI），arboard 写剪贴板图片，image 编 PNG / 缩略图 / 落盘。预览经
   `img(ImageSource::Image(...))` 显示，id 每次截取必须换新。
