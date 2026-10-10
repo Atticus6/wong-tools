@@ -51,15 +51,21 @@ if (Test-Path -LiteralPath $zip) {
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
 Write-Host "便携包：$zip"
 
-# Inno 编译器定位：PATH 里有就用，没有看默认安装路径，都没有就明说。
+# Inno 编译器定位：PATH 里有就用，没有看两个默认安装路径（按机 / 按用户），
+# 都没有就明说。
 $iscc = $null
 $found = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if ($null -ne $found) {
     $iscc = $found.Source
 } else {
-    $default = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-    if (Test-Path -LiteralPath $default) {
-        $iscc = $default
+    foreach ($candidate in @(
+        'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
+    )) {
+        if (Test-Path -LiteralPath $candidate) {
+            $iscc = $candidate
+            break
+        }
     }
 }
 if ($null -eq $iscc) {
