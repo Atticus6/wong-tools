@@ -1,0 +1,59 @@
+# 打包发布：push `v*` tag 或手动触发时，在 Windows 上构建 release、
+# 打便携 ZIP + Inno 安装包；tag 触发顺手建 GitHub Release。
+# 版本号只认 Cargo.toml（packaging\build.ps1 里读），tag 只是扳机。
+# 未签名发布：要签名走 https://gpui-kit.com/docs/packaging/ 的两步流程。
+
+name: package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Inno Setup 6：装完 ISCC 在默认路径，build.ps1 自己找得到。
+      - name: 安装 Inno Setup 6
+        run: choco install innosetup --no-progress -y
+
+      - name: 打包
+        run: powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+
+      # 校验和文件：跟安装包一起进 Release，用户下载完对一遍。
+      - name: 写校验和
+        run: |
+          $lines = @()
+          $lines += ((Get-FileHash dist\wong-tools-windows-x64.zip -Algorithm SHA256).Hash.ToLower() + '  wong-tools-windows-x64.zip')
+          $setup = Get-ChildItem dist\WongTools-Setup-*.exe | Select-Object -First 1
+          $lines += ((Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $setup.Name)
+          $lines | Out-File dist\SHA256SUMS.txt -Encoding ascii
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: wong-tools-windows
+          path: |
+            dist/wong-tools-windows-x64.zip
+            dist/WongTools-Setup-*.exe
+            dist/SHA256SUMS.txt
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wong-tools-windows-x64.zip
+            dist/WongTools-Setup-*.exe
+            dist/SHA256SUMS.txt
