@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputState};
@@ -14,7 +15,7 @@ use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::WindowExt;
-use gpui_kit::component::{ActiveTheme, Sizable as _, VirtualListScrollHandle, v_virtual_list};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::*;
 
 use crate::i18n::t;
@@ -325,7 +326,7 @@ impl WsShell {
     /// 分流查询 8 万条全扫几毫秒，直接 UI 线程算。
     pub(crate) fn render_proxy(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 卡片网格布局按实时窗宽算，保证每行撑满。
-        let grid = crate::shell::grid_layout(window);
+        let grid = crate::shell::grid_layout(window, self.sidebar_collapsed);
         let muted = cx.theme().muted_foreground;
         div()
             .flex()
@@ -1500,10 +1501,11 @@ impl WsShell {
                             )
                             .children(has_nodes.then(|| {
                                 Button::new(ElementId::named_usize("proxy-group-test", gi))
-                                    // “测速”
-                                    .label(t("app.proxy_speedtest"))
+                                    // “测速”（纯图标按钮，hover 提示不能少）。
+                                    .tooltip(t("app.proxy_speedtest"))
+                                    .ghost()
                                     .small()
-                                    .outline()
+                                    .icon(Icon::new(IconName::Gauge).size(px(14.)))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.start_group_speedtest(group_name.clone(), cx);

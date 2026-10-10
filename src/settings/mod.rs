@@ -44,6 +44,8 @@ const KEY_PROXY_RUNNING: &str = "proxy_running";
 const KEY_WINDOW_BOUNDS: &str = "window_bounds";
 /// 侧边栏上次选中的工具序号。
 const KEY_SELECTED_TOOL: &str = "selected_tool";
+/// 侧边栏收起态（"1" = 收起）：随手存，启动恢复。
+const KEY_SIDEBAR_COLLAPSED: &str = "sidebar_collapsed";
 /// 呼出搜索条的全局快捷键（`"Alt+Space"` 这种写法，见 `spotlight`）。
 const KEY_HOTKEY: &str = "hotkey";
 /// AI 转发网关端口（字符串存，非法回落默认）。
@@ -603,6 +605,28 @@ pub fn set_selected_tool(ix: usize) -> Result<(), String> {
     })
 }
 
+/// 读侧边栏收起态；没存过、非法、库坏了都返回 `None`，调用方回落展开。
+pub fn sidebar_collapsed() -> Option<bool> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_SIDEBAR_COLLAPSED).await.ok()?
+    })?;
+    match raw.as_str() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// 存侧边栏收起态（点收起按钮即调，低频）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_sidebar_collapsed(collapsed: bool) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_SIDEBAR_COLLAPSED, if collapsed { "1" } else { "0" }).await
+    })
+}
+
 /// 读呼出搜索条的快捷键原文；没存过或库坏了返回 `None`，
 /// 调用方回落默认（`spotlight::DEFAULT_HOTKEY`）。格式校验是 `spotlight`
 /// 的事，这里只存原文（非法值读出来照给，调用方解析失败再回落）。
@@ -1124,6 +1148,30 @@ mod tests {
         assert_eq!(hotkey(), None, "没存过读 None");
         set_hotkey("Alt+Space").expect("能写快捷键");
         assert_eq!(hotkey().as_deref(), Some("Alt+Space"), "原文往返一致");
+    }
+
+    #[test]
+    fn sidebar_collapsed_roundtrip_through_public_api() {
+        // 收起态走公共 API 往返：空库读 None，写完读回一致；非法值读 None。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("sidebar-collapsed");
+        use super::set_sidebar_collapsed;
+        use super::sidebar_collapsed;
+        assert_eq!(sidebar_collapsed(), None, "没存过读 None");
+        set_sidebar_collapsed(true).expect("能写收起态");
+        assert_eq!(sidebar_collapsed(), Some(true), "收起往返一致");
+        set_sidebar_collapsed(false).expect("能写展开态");
+        assert_eq!(sidebar_collapsed(), Some(false), "展开往返一致");
+        super::block_on(async {
+            let path = std::env::var("WONG_SETTINGS_DB").expect("临时库已指向");
+            let conn = super::open(std::path::Path::new(&path))
+                .await
+                .expect("测试库能打开");
+            super::set(&conn, super::KEY_SIDEBAR_COLLAPSED, "abc")
+                .await
+                .expect("能种坏数据");
+        });
+        assert_eq!(sidebar_collapsed(), None, "非法值读 None");
     }
 
     #[test]

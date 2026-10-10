@@ -27,11 +27,12 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - `src/main.rs`——只做启动：字体 → `gpui_kit::init` → `theme::init`
   → `open_window`。不写任何 UI 代码。
 - `src/shell.rs`——`WsShell`：38px 自绘标题栏（品牌 + 拖拽区 + 经
-  `WindowControlArea` 接管的原生标题栏按钮）+ 216px 侧边导航 +
-  内容区。工具只剩 5 个：截图 / 代理 / AI 转发是真工具
+  `WindowControlArea` 接管的原生标题栏按钮）+ 侧边导航（216px，
+  标题右侧（紧靠标题）收起按钮（官方 `SidebarToggleButton` 没透出 tooltip，
+  自建同款 ghost 图标按钮）一键收起成 52px 图标列）+ 内容区。工具只剩 5 个：截图 / 代理 / AI 转发是真工具
   （状态在 `WsShell.shot` / `WsShell.proxy` / `WsShell.airelay`），
   欢迎是占位首页，设置页是真交互（语言 / 主题切换），
-  选中态暂存 `WsShell`。
+  选中态和收起态暂存 `WsShell`（收起随手持久化，启动恢复）。
 - `src/tools/`——一个工具一个文件夹，逻辑 + 视图都关在里面，跨工具
   只认 `crate::tools::<工具名>::` 路径（状态类型在 tool 根重导出，
   不直接钻 `view`）。加新工具：在此建文件夹 + `TOOLS` 登记 +
@@ -140,9 +141,9 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 ## 卡片网格布局规范（模型 / 节点卡片）
 
 - 版式：`div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0()`，
-  布局经 `crate::shell::grid_layout(window)` 拿（`GridLayout { cols, width }`）：
+  布局经 `crate::shell::grid_layout(window, collapsed)` 拿（`GridLayout { cols, width }`）：
   列数按实时窗宽 `(内容区 + 8) / (232 + 8)` 夹 2..=6，定宽恒等于内容区宽
-  （窗宽 − 216 侧边 − 32 页边距），resize 即换。
+  （窗宽 − 侧边（216，收起 52）− 32 页边距），resize/收起即换。
 - 卡片本体不设 flex 和定宽（轨道定宽，设了会被覆盖还乱换行）；
   `window` 从 `render` 经 `render_content` / `render_tool_body` 往下传到网格。
 - 宽表（请求 / 连接 DataTable）同理在链上加 `min_w_0`，表格被夹出确定宽度，
@@ -184,6 +185,10 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   `Language` 分支 + `LANGUAGES` 登记；加文案：两列同时加，并在
   `i18n::tests::KEYS` 登记。组件内置文案应用侧查不到，缺 key 时
   `t()` 返回 key 本身。
+- 纯图标按钮必须带 hover 提示：`Button` 用 `.tooltip(t("app.xxx"))`
+  说明功能（文案同样两列 + `KEYS` 登记）。`div` 没有公开的 tooltip
+  接法（框架 `ManagedTooltipExt` 未导出），图标式导航行暂不挂。
+  官方 `SidebarToggleButton` 没透出 tooltip，要提示就自建同款。
 - `extend!(gpui_component)` 在启动时只调一次，且必须在 `gpui_kit::init`
   之前。语言切换走 `component::set_locale`（经 `i18n::set_language`）。
 - 改全局 locale 的测试必须拿 `i18n::lock_locale()` 串行，否则并行跑

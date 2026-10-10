@@ -103,7 +103,8 @@ mod tests {
     const KEYS: &[&str] = &[
         "app.app_name",
         "app.window_title",
-        "app.new_tool",
+        "app.sidebar_collapse",
+        "app.sidebar_expand",
         "app.tool_welcome",
         "app.tool_welcome_hint",
         "app.tool_screenshot",
@@ -311,10 +312,10 @@ mod tests {
         let _settings = TempSettings::install("i18n-switch");
         let prev = language();
         set_language(Language::English);
-        assert_eq!(t("app.new_tool"), "New");
+        assert_eq!(t("app.tool_screenshot"), "Screenshot");
         set_language(Language::Chinese);
-        // “新建”
-        assert_eq!(t("app.new_tool"), "新建");
+        // “截图”
+        assert_eq!(t("app.tool_screenshot"), "截图");
         set_language(prev);
     }
 }

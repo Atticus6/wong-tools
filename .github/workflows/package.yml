@@ -55,6 +55,12 @@ jobs:
         if: startsWith(matrix.target, 'macos')
         run: rustup target add ${{ matrix.rust_target }}
 
+      # DMG 精装版式：create-dmg 定窗口尺寸 + 图标坐标 + Applications 拖放替身，
+      # 成品即 DBX 那种左右两图标（无底图，版式靠坐标；有了美术资源再加 --background）。
+      - name: 装 create-dmg
+        if: startsWith(matrix.target, 'macos')
+        run: brew install create-dmg
+
       # Linux 编译期系统依赖：官方 installation 在 Ubuntu 24.04 验证过的那串，
       # 加 pkg-config/cmake 保底；webkit 是 gpui-kit 特性链要的头文件；
       # pipewire 是截图库 xcap 在 Linux 下走 Wayland 录屏要的（libspa-sys
@@ -106,6 +112,8 @@ jobs:
       # macOS：.app 进 ZIP（ditto 保 bundle 元数据）+ 未签名 DMG（能装不能公发，
       # 公发要 Developer ID 签名 + 公证，见 packaging 文档）。双架构各打各的包，
       # 跑在不同虚拟机里，dist 路径不冲突。
+      # DMG 带 Applications 替身：挂载后把 .app 拖到替身上即完成安装
+      #（替身是软链接，hdiutil 原样收进镜像；窗口布局用 Finder 默认排列）。
       - name: 打包 macOS
         if: startsWith(matrix.target, 'macos')
         shell: bash
@@ -117,7 +125,21 @@ jobs:
           cp "target/${{ matrix.rust_target }}/release/wong-tools" "$APP/Contents/MacOS/wong-tools"
           sed -e "s/__VERSION__/$APP_VERSION/" -e "s/__BUILD__/${{ github.run_number }}/" packaging/Info.plist > "$APP/Contents/Info.plist"
           ditto -c -k --keepParent "$APP" "dist/WongTools-${{ matrix.target }}.zip"
-          hdiutil create -volname "Wong Tools" -srcfolder "$APP" -ov -format UDZO "dist/WongTools-${{ matrix.target }}.dmg"
+          # 暂存目录只放 .app，Applications 替身由 create-dmg 的 --app-drop-link 建。
+          STAGE=dist/dmg-stage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/WongTools.app"
+          create-dmg \
+            --volname "Wong Tools" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 100 \
+            --icon "WongTools.app" 180 205 \
+            --app-drop-link 480 205 \
+            "dist/WongTools-${{ matrix.target }}.dmg" \
+            "$STAGE"
+          rm -rf "$STAGE"
           (cd dist && shasum -a 256 "WongTools-${{ matrix.target }}.zip" "WongTools-${{ matrix.target }}.dmg" > "SHA256SUMS-${{ matrix.target }}.txt")
 
       - name: 上传产物

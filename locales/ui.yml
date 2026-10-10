@@ -6,9 +6,12 @@ app:
   window_title:
     en: Wong Tools
     zh-CN: Wong Tools
-  new_tool:
-    en: New
-    zh-CN: 新建
+  sidebar_collapse:
+    en: Collapse sidebar
+    zh-CN: 收起侧边栏
+  sidebar_expand:
+    en: Expand sidebar
+    zh-CN: 展开侧边栏
   tool_welcome:
     en: Welcome
     zh-CN: 欢迎

@@ -3,7 +3,7 @@
 //! 这里按 `TOOLS` 分发。跨模块调的都走 `pub(crate)`，别放出去。
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::*;
 
@@ -15,6 +15,8 @@ const HEADER_H: f32 = 44.0;
 /// 原生 Windows 标题栏按钮宽度（系统度量）。
 const CAPTION_W: f32 = 46.0;
 const SIDEBAR_W: f32 = 216.0;
+/// 收起态侧边栏宽（逻辑像素）：只剩图标列，内容区多出 164px。
+const SIDEBAR_COLLAPSED_W: f32 = 52.0;
 
 /// 唯一的小字号阶梯（逻辑像素）。各工具视图共用，见 `tools/*`。
 pub(crate) const TEXT_SM: f32 = 12.0;
@@ -42,8 +44,14 @@ pub(crate) struct GridLayout {
 
 /// 网格布局：按实时窗宽算（resize 即换），列数夹在 2..=6 之间，
 /// 定宽恒等于内容区宽（最小窗口两列不挤，超宽屏六列不空）。
-pub(crate) fn grid_layout(window: &Window) -> GridLayout {
-    let content = (window.bounds().size.width.as_f32() - SIDEBAR_W - PAGE_PAD_X).max(0.);
+/// 侧边栏收起时内容区变宽，调用方把外壳的收起态传进来一起算。
+pub(crate) fn grid_layout(window: &Window, collapsed: bool) -> GridLayout {
+    let sidebar_w = if collapsed {
+        SIDEBAR_COLLAPSED_W
+    } else {
+        SIDEBAR_W
+    };
+    let content = (window.bounds().size.width.as_f32() - sidebar_w - PAGE_PAD_X).max(0.);
     let cols = (((content + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as u16).clamp(2, 6);
     GridLayout { cols, width: content }
 }
@@ -165,6 +173,9 @@ pub(crate) fn settings_tool_index() -> usize {
 /// （主题本体的应用走 `crate::theme`，这里只记选中态用来高亮）。
 pub struct WsShell {
     pub(crate) selected: usize,
+    /// 侧边栏收起态：随手持久化（`sidebar_collapsed`），启动恢复；
+    /// 收起时只剩图标列，网格布局按窄栏重算。
+    pub(crate) sidebar_collapsed: bool,
     pub(crate) settings_theme: String,
     /// 主窗口句柄：搜索面板执行完把主窗拉回前台用（最小化也要还原）。
     /// 构造期只记 id，不读窗口几何（那时 `bounds()` 不可靠，句柄不受影响）。
@@ -183,6 +194,8 @@ impl WsShell {
             selected: crate::settings::selected_tool()
                 .filter(|ix| *ix < TOOLS.len())
                 .unwrap_or(0),
+            // 侧边栏收起态：没存过回落展开。
+            sidebar_collapsed: crate::settings::sidebar_collapsed().unwrap_or(false),
             // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
             settings_theme: crate::theme::selected(),
             main_window: window.window_handle(),
@@ -203,11 +216,18 @@ impl WsShell {
         }
     }
 
+    /// 侧边栏收起/展开：翻转即持久化，失败只记日志，通知重绘让网格重算。
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        if let Err(e) = crate::settings::set_sidebar_collapsed(self.sidebar_collapsed) {
+            eprintln!("存侧边栏收起态失败: {e}");
+        }
+        cx.notify();
+    }
+
     fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // “Wong Tools”
         let app_name = t("app.app_name");
-        // “新建”
-        let new_tool = t("app.new_tool");
         let accent = cx.theme().link;
         let fg = cx.theme().foreground;
         let title_bg = cx.theme().title_bar;
@@ -219,6 +239,16 @@ impl WsShell {
         let is_mac = cfg!(target_os = "macos");
         let left_pad = if is_mac { 72. } else { 12. };
         let right_pad = if is_mac { 12. } else { 0. };
+        // 侧边栏收起按钮紧靠标题右侧：官方 SidebarToggleButton，
+        // 图标随状态在 PanelLeftClose/Open 间切；无障碍标签按状态给动作名。
+        let collapsed = self.sidebar_collapsed;
+        let toggle_label = if collapsed {
+            // “展开侧边栏”
+            t("app.sidebar_expand")
+        } else {
+            // “收起侧边栏”
+            t("app.sidebar_collapse")
+        };
 
         div()
             .flex()
@@ -261,17 +291,29 @@ impl WsShell {
                             .child(app_name),
                     ),
             )
+            // 侧边栏收起按钮紧靠标题右边：官方 SidebarToggleButton 没透出
+            // tooltip，自建同款（ghost 小图标 + 开合图标 + hover 提示）。
+            // 独立孩子，不进拖拽区，不然点不到。
+            .child({
+                let icon = if collapsed {
+                    IconName::PanelLeftOpen
+                } else {
+                    IconName::PanelLeftClose
+                };
+                Button::new("sidebar-toggle")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(icon).size(px(14.)))
+                    // hover 提示 + 无障碍标签：按状态给动作名，走文案。
+                    .tooltip(toggle_label.clone())
+                    .accessibility_label(toggle_label)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_sidebar(cx);
+                    }))
+            })
             // 品牌和标题栏按钮之间的弹性拖拽区。
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
-            .child(
-                Button::new("new-tool")
-                    // “新建”
-                    .label(new_tool)
-                    .small()
-                    .outline()
-                    .cursor_pointer()
-                    .on_click(|_, _, _| println!("New tool (not implemented yet)")),
-            )
             // macOS 用系统红绿灯（左上），右侧不画 Windows 按钮；
             // Windows 才要 8px 间隔 + 三个贴边按钮。
             .children(if is_mac {
@@ -287,6 +329,7 @@ impl WsShell {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.sidebar_collapsed;
         let sidebar_bg = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let row_bg = cx.theme().sidebar_accent;
@@ -297,7 +340,11 @@ impl WsShell {
             .flex_none()
             .flex()
             .flex_col()
-            .w(px(SIDEBAR_W))
+            .w(px(if collapsed {
+                SIDEBAR_COLLAPSED_W
+            } else {
+                SIDEBAR_W
+            }))
             .h_full()
             .bg(sidebar_bg)
             .border_r_1()
@@ -312,7 +359,7 @@ impl WsShell {
                 } else {
                     (hsla(0., 0., 0., 0.), idle_fg)
                 };
-                div()
+                let row = div()
                     .id(ElementId::named_usize("nav", ix))
                     .flex()
                     .flex_none()
@@ -336,8 +383,20 @@ impl WsShell {
                         cx.notify();
                     }))
                     .child(Icon::new(tool.icon.clone()).size(px(14.)))
-                    // 行标签：工具名，中文见 locales/ui.yml（如“欢迎”）。
-                    .child(div().text_size(px(TEXT_MD)).child(tool.id.name()))
+                    // 行标签：工具名，中文见 locales/ui.yml（如“欢迎”）；
+                    // 收起态藏掉，只剩图标列。
+                    .children(if collapsed {
+                        Vec::new()
+                    } else {
+                        vec![
+                            div()
+                                .text_size(px(TEXT_MD))
+                                .child(tool.id.name())
+                                .into_any_element(),
+                        ]
+                    });
+                // 收起态只剩一个图标，居中；展开态图标 + 标签左排。
+                if collapsed { row.justify_center() } else { row }
             }))
     }
 

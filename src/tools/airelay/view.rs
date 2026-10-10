@@ -162,7 +162,7 @@ impl WsShell {
     /// 切到请求页也即刷一次（没开网关时心跳没有，表会是空的）。
     pub(crate) fn render_airelay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 卡片网格布局按实时窗宽算，保证每行撑满。
-        let grid = crate::shell::grid_layout(window);
+        let grid = crate::shell::grid_layout(window, self.sidebar_collapsed);
         div()
             .flex()
             .flex_1()
