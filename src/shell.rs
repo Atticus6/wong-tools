@@ -55,8 +55,6 @@ enum ToolId {
     Screenshot,
     Proxy,
     AiRelay,
-    Text,
-    Convert,
     Settings,
 }
 
@@ -72,10 +70,6 @@ impl ToolId {
             ToolId::Proxy => t("app.tool_proxy"),
             // “AI 转发”
             ToolId::AiRelay => t("app.tool_airelay"),
-            // “文本工具”
-            ToolId::Text => t("app.tool_text"),
-            // “格式转换”
-            ToolId::Convert => t("app.tool_convert"),
             // “设置”
             ToolId::Settings => t("app.tool_settings"),
         }
@@ -92,10 +86,6 @@ impl ToolId {
             ToolId::Proxy => t("app.tool_proxy_hint"),
             // “Zen 免费模型网关”
             ToolId::AiRelay => t("app.tool_airelay_hint"),
-            // “敬请期待”
-            ToolId::Text => t("app.tool_text_hint"),
-            // “敬请期待”
-            ToolId::Convert => t("app.tool_convert_hint"),
             // “主题与偏好”
             ToolId::Settings => t("app.tool_settings_hint"),
         }
@@ -126,14 +116,6 @@ const TOOLS: &[ToolDef] = &[
         icon: IconName::Bot,
     },
     ToolDef {
-        id: ToolId::Text,
-        icon: IconName::FileText,
-    },
-    ToolDef {
-        id: ToolId::Convert,
-        icon: IconName::ArrowLeftRight,
-    },
-    ToolDef {
         id: ToolId::Settings,
         icon: IconName::Settings,
     },
@@ -153,13 +135,11 @@ pub(crate) struct ToolEntry {
 /// 侧边栏顺序的工具入口（聚光搜索跳转命令用）。
 pub(crate) fn tool_entries() -> Vec<ToolEntry> {
     const KEYWORDS: &[&str] = &[
-        // 欢迎 / 截图 / 代理 / AI 转发 / 文本工具 / 格式转换 / 设置
+        // 欢迎 / 截图 / 代理 / AI 转发 / 设置
         "welcome home start",
         "screenshot capture printscreen",
         "proxy vless vpn tunnel",
         "ai relay zen models gateway",
-        "text tools",
-        "convert format transform",
         "settings preferences hotkey",
     ];
     TOOLS
@@ -186,6 +166,9 @@ pub(crate) fn settings_tool_index() -> usize {
 pub struct WsShell {
     pub(crate) selected: usize,
     pub(crate) settings_theme: String,
+    /// 主窗口句柄：搜索面板执行完把主窗拉回前台用（最小化也要还原）。
+    /// 构造期只记 id，不读窗口几何（那时 `bounds()` 不可靠，句柄不受影响）。
+    pub(crate) main_window: AnyWindowHandle,
     pub(crate) shot: crate::tools::screenshot::ShotState,
     pub(crate) proxy: crate::tools::proxy::ProxyView,
     pub(crate) spotlight: crate::spotlight::SpotlightView,
@@ -202,6 +185,7 @@ impl WsShell {
                 .unwrap_or(0),
             // 高亮跟随上次的选择：`theme::init` 启动时已经应用过了。
             settings_theme: crate::theme::selected(),
+            main_window: window.window_handle(),
             shot: crate::tools::screenshot::ShotState::empty(),
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
             spotlight: crate::spotlight::SpotlightView::new(cx),

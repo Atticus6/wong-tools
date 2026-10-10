@@ -22,9 +22,10 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   → `open_window`。不写任何 UI 代码。
 - `src/shell.rs`——`WsShell`：38px 自绘标题栏（品牌 + 拖拽区 + 经
   `WindowControlArea` 接管的原生标题栏按钮）+ 216px 侧边导航 +
-  内容区。截图和代理是真工具（状态在 `WsShell.shot` / `WsShell.proxy`）；
-  其余工具仍是 `TOOLS` 占位项，各配独立视图；设置页是真交互
-  （语言 / 主题切换），选中态暂存 `WsShell`。
+  内容区。工具只剩 5 个：截图 / 代理 / AI 转发是真工具
+  （状态在 `WsShell.shot` / `WsShell.proxy` / `WsShell.airelay`），
+  欢迎是占位首页，设置页是真交互（语言 / 主题切换），
+  选中态暂存 `WsShell`。
 - `src/tools/`——一个工具一个文件夹，逻辑 + 视图都关在里面，跨工具
   只认 `crate::tools::<工具名>::` 路径（状态类型在 tool 根重导出，
   不直接钻 `view`）。加新工具：在此建文件夹 + `TOOLS` 登记 +
@@ -35,9 +36,13 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   快捷键解析/`HotkeyHandle`）+ `view.rs`（主窗侧 `SpotlightView`
   开关 + 面板窗 `PaletteView`）。多窗口做法见官方 multi-window 文档：
   每窗独立 `Root`，面板执行命令回主窗口（`WeakEntity<WsShell>`），
-  跑完自关并把应用提到前台；关窗策略是全关才退。面板窗 mac 红绿灯用
-  越界位置藏掉（框架没隐藏开关，升级时复查）。面板只认 Esc/执行/开关，
-  点窗外不关。
+  跑完自关并把主窗还原到前台（平台级 `activate_window`，最小化也拉回，
+  再做应用级 `activate` 兜底）；关窗策略是全关才退。面板窗 mac 红绿灯用
+  越界位置藏掉（框架没隐藏开关，升级时复查）。面板 Esc/执行/开关/窗外
+  点击都关：输入框 `on_focus_out` + 鼠标已出本窗即关，窗内点行放行
+  （行不可聚焦，点下先 blur，等行自己的 `on_click` 跑命令）。
+  开窗 1.5 秒内的抖动 blur 不认（后台呼出时焦点同步会先丢一次，
+  认了等于闪退）。
   全局键走 `global-hotkey`（后台也能收），应用内走官方 keybinding（`bind_keys` + Action +
   `on_action`，`None` 上下文后来居上）；两边调同一个开关，系统键会把
   事件吃掉，不双跳。按键录制用 `capture_key_down` 读 `Keystroke` 现拼原文。

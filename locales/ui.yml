@@ -15,24 +15,12 @@ app:
   tool_welcome_hint:
     en: Toolbox home
     zh-CN: 工具箱首页
-  tool_text:
-    en: Text Tools
-    zh-CN: 文本工具
-  tool_text_hint:
-    en: Coming soon
-    zh-CN: 敬请期待
   tool_screenshot:
     en: Screenshot
     zh-CN: 截图
   tool_screenshot_hint:
     en: Capture the primary monitor
     zh-CN: 截取主显示器全屏
-  tool_convert:
-    en: Format Converter
-    zh-CN: 格式转换
-  tool_convert_hint:
-    en: Coming soon
-    zh-CN: 敬请期待
   tool_proxy:
     en: Proxy
     zh-CN: 代理

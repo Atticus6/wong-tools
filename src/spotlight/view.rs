@@ -2,7 +2,8 @@
 //!
 //! 主窗口只留开关（`SpotlightView`：热键管理 + 面板句柄 + 录制态）；
 //! 面板窗口是 `PaletteView`（本文件），查询/高亮随窗生死，命令执行回
-//! 主窗口（`WeakEntity<WsShell>`），跑完自关并把应用提到前台。
+//! 主窗口（`WeakEntity<WsShell>`），跑完自关并把主窗还原到前台
+//! （平台级激活，最小化也拉回，再做应用级激活兜底）。
 //! 多窗口做法见 https://gpui-kit.com/docs/multi-window/ ，键盘走
 //! https://gpui-kit.com/docs/keybinding/ 。
 
@@ -177,6 +178,12 @@ pub(crate) struct PaletteView {
     selected: usize,
     /// 首帧聚焦做过：render 里只抢一次焦点。
     focused_once: bool,
+    /// 输入框失焦关窗订阅：随窗生死，关窗自动注销。
+    /// 窗内点行会先丢一次焦点（行不可聚焦），靠鼠标位置放行，
+    /// 等行自己的 on_click 跑命令；鼠标已出窗才是点窗外，直接关。
+    /// 只为持有（drop 即退订），从不读。
+    #[allow(dead_code)]
+    blur_dismiss: Subscription,
     /// 打开时代理是否在跑：首帧是同步画出来的（`open_window` 里直接
     /// `draw`），那时主窗口正借着，渲染里现读会嵌套更新直接崩；
     /// 所以打开前快照一次。反正跑完命令就关窗，不存在过期。
@@ -242,13 +249,39 @@ impl PaletteView {
     ) -> Self {
         // “搜索工具、命令、设置…”
         let hint = t("app.spotlight_hint");
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        // 输入框失焦关窗：点窗外（鼠标已出本窗）直接关，窗内点行放行。
+        // render 首帧才抢焦点，之前不可能 blur，不会误关。
+        let focus = query.read(cx).focus_handle(cx).clone();
+        let dismiss_main = main.clone();
+        let opened_at = std::time::Instant::now();
+        let blur_dismiss = window.on_focus_out(&focus, &mut *cx, move |_event, window, cx| {
+            // 鼠标坐标是窗内相对值：还在窗内就是点行之类的窗内交互，
+            // 放行等 on_click；出了窗才是真的离开。
+            let local = Bounds {
+                origin: point(px(0.), px(0.)),
+                size: window.bounds().size,
+            };
+            if local.contains(&window.mouse_position()) {
+                return;
+            }
+            // 开窗初期的抖动 blur 不认：后台呼出时焦点同步会先丢一次，
+            // 用户还没碰过就关了等于闪退。1.5 秒足够同步落定。
+            const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+            if opened_at.elapsed() < GRACE {
+                return;
+            }
+            window.remove_window();
+            let _ = dismiss_main.update(cx, |view, _| view.spotlight.palette = None);
+        });
         Self {
-            query: cx.new(|cx| InputState::new(window, cx).placeholder(hint)),
+            query,
             last_query: String::new(),
             selected: 0,
             focused_once: false,
             running: proxy_running,
             main,
+            blur_dismiss,
         }
     }
 
@@ -269,7 +302,7 @@ impl PaletteView {
             .collect()
     }
 
-    /// 执行高亮行：主窗口分发 + 关本窗 + 把应用提到前台。
+    /// 执行高亮行：主窗口分发 + 收尾（关窗、前台，见 `run_and_close`）。
     /// 主窗口已经没了就只关窗，不报错。
     fn confirm_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let action = self
@@ -279,10 +312,23 @@ impl PaletteView {
         let Some(action) = action else {
             return;
         };
-        let _ = self
-            .main
-            .update(cx, |view, cx| view.run_spotlight_action(&action, cx));
-        self.close_self(window, cx);
+        self.run_and_close(&action, window, cx);
+    }
+
+    /// 执行收尾：主窗分发 → 关本窗 → 清句柄 → 主窗拉回前台 → 应用级激活。
+    /// 主窗前台必须走平台级 `activate_window`：它会先还原最小化的窗口；
+    /// 光调应用级 `activate` 不够，Windows 下最小化的主窗只会在任务栏闪，
+    /// 用户看到的就是“点了没反应”。主窗口已经没了就只关窗，不报错。
+    fn run_and_close(&self, action: &SpotlightAction, window: &mut Window, cx: &mut Context<Self>) {
+        let main = self.main.clone();
+        let _ = main.update(cx, |view, cx| view.run_spotlight_action(action, cx));
+        window.remove_window();
+        let _ = main.update(cx, |view, _| view.spotlight.palette = None);
+        let _ = main.update(cx, |view, cx| {
+            let _ = view
+                .main_window
+                .update(cx, |_, window, _| window.activate_window());
+        });
         cx.activate(true);
     }
 
@@ -330,7 +376,6 @@ impl Render for PaletteView {
                     (hsla(0., 0., 0., 0.), idle_fg)
                 };
                 let action = command.action.clone();
-                let main = self.main.clone();
                 div()
                     .id(ElementId::named_usize("spot-row", ix))
                     .flex()
@@ -344,13 +389,8 @@ impl Render for PaletteView {
                     .text_color(fg)
                     .cursor_pointer()
                     .hover(move |s| if active { s } else { s.bg(row_bg) })
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        let _ = main.update(cx, |view, cx| {
-                            view.run_spotlight_action(&action, cx)
-                        });
-                        window.remove_window();
-                        let _ = main.update(cx, |view, _| view.spotlight.palette = None);
-                        cx.activate(true);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_and_close(&action, window, cx);
                     }))
                     .child(
                         div()
