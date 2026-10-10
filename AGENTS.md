@@ -119,9 +119,23 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   `notify`）；拿本窗口弱引用用 `cx.entity().downgrade()`。
 - 样式辅助都挂在主题字段上（`title_bar`、`sidebar`、`border`…）；
   `link` 是真正可读的实色点缀色，`accent` 只是低透明度的 wash。
+- flex column 的孩子默认不拉伸（宽度按 max-content 往上冒）：
+  `w_full` 的百分比遇到不定宽父级会退化成 auto——要铺满必须给确定像素。
+  `flex_1` 的 basis 0 会让换行按 0 算（一行全挤下），别拿它做换行网格。
 - `Cargo.toml` 的 `[profile.dev.package]` opt-level 覆盖是刻意的
   （只优化框架依赖，应用自身保持可调试）。`Cargo.lock` 保持提交。
   永远不要提交 `target/`。
+
+## 卡片网格布局规范（模型 / 节点卡片）
+
+- 版式：`div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0()`，
+  布局经 `crate::shell::grid_layout(window)` 拿（`GridLayout { cols, width }`）：
+  列数按实时窗宽 `(内容区 + 8) / (232 + 8)` 夹 2..=6，定宽恒等于内容区宽
+  （窗宽 − 216 侧边 − 32 页边距），resize 即换。
+- 卡片本体不设 flex 和定宽（轨道定宽，设了会被覆盖还乱换行）；
+  `window` 从 `render` 经 `render_content` / `render_tool_body` 往下传到网格。
+- 宽表（请求 / 连接 DataTable）同理在链上加 `min_w_0`，表格被夹出确定宽度，
+  表内横滚才出得来；只加 `min_w_0` 不加宽约束时窄窗依然可能放不下（另行处理）。
 
 ## gpui-kit 组件一览（v0.7.1，详见 https://gpui-kit.com/component/）
 
