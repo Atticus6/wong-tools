@@ -1,5 +1,6 @@
-# 打包发布：push `v*` tag 或手动触发时，三平台并行构建出包；
-# tag 触发最后由 release 作业汇总建 GitHub Release（只建一次）。
+# 打包发布：push `v*` tag 或手动触发时，三平台并行构建出包
+#（mac 出 arm64 + x64 双架构）；tag 触发最后由 release 作业汇总建
+# GitHub Release（只建一次）。
 # 版本号只认 Cargo.toml，tag 只是扳机；mac 包标识见 packaging/Info.plist。
 # 未签名发布：要签名走 https://gpui-kit.com/docs/packaging/ 的流程。
 
@@ -23,14 +24,21 @@ env:
 jobs:
   package:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: windows
           - os: ubuntu-latest
             target: linux
+          # mac 双架构：都在 macos-latest（ARM 跑者）上构建，x64 走官方交叉工具链，
+          # 不依赖 Intel 跑者（GitHub 已逐步下线），产物名按架构区分。
           - os: macos-latest
-            target: macos
+            target: macos-aarch64
+            rust_target: aarch64-apple-darwin
+          - os: macos-latest
+            target: macos-x64
+            rust_target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +48,12 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
+
+      # mac 交叉编译目标：aarch64 是原生，x86_64 由 ARM 跑者交叉编
+      #（Apple 工具链官方支持，不用另装 linker）。
+      - name: 加 mac 编译目标
+        if: startsWith(matrix.target, 'macos')
+        run: rustup target add ${{ matrix.rust_target }}
 
       # Linux 编译期系统依赖：官方 installation 在 Ubuntu 24.04 验证过的那串，
       # 加 pkg-config/cmake 保底；webkit 是 gpui-kit 特性链要的头文件；
@@ -90,20 +104,21 @@ jobs:
           (cd dist && sha256sum wong-tools-linux-x64.tar.gz "wong-tools_${APP_VERSION}_amd64.deb" > SHA256SUMS-linux.txt)
 
       # macOS：.app 进 ZIP（ditto 保 bundle 元数据）+ 未签名 DMG（能装不能公发，
-      # 公发要 Developer ID 签名 + 公证，见 packaging 文档）。
+      # 公发要 Developer ID 签名 + 公证，见 packaging 文档）。双架构各打各的包，
+      # 跑在不同虚拟机里，dist 路径不冲突。
       - name: 打包 macOS
-        if: matrix.target == 'macos'
+        if: startsWith(matrix.target, 'macos')
         shell: bash
         run: |
           set -eu
-          cargo build --release --locked
+          cargo build --release --locked --target ${{ matrix.rust_target }}
           APP=dist/WongTools.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp target/release/wong-tools "$APP/Contents/MacOS/wong-tools"
+          cp "target/${{ matrix.rust_target }}/release/wong-tools" "$APP/Contents/MacOS/wong-tools"
           sed -e "s/__VERSION__/$APP_VERSION/" -e "s/__BUILD__/${{ github.run_number }}/" packaging/Info.plist > "$APP/Contents/Info.plist"
-          ditto -c -k --keepParent "$APP" dist/WongTools-macos-aarch64.zip
-          hdiutil create -volname "Wong Tools" -srcfolder "$APP" -ov -format UDZO dist/WongTools-macos-aarch64.dmg
-          (cd dist && shasum -a 256 WongTools-macos-aarch64.zip WongTools-macos-aarch64.dmg > SHA256SUMS-macos.txt)
+          ditto -c -k --keepParent "$APP" "dist/WongTools-${{ matrix.target }}.zip"
+          hdiutil create -volname "Wong Tools" -srcfolder "$APP" -ov -format UDZO "dist/WongTools-${{ matrix.target }}.dmg"
+          (cd dist && shasum -a 256 "WongTools-${{ matrix.target }}.zip" "WongTools-${{ matrix.target }}.dmg" > "SHA256SUMS-${{ matrix.target }}.txt")
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
@@ -118,9 +133,12 @@ jobs:
             dist/SHA256SUMS-linux.txt
             dist/WongTools-macos-aarch64.zip
             dist/WongTools-macos-aarch64.dmg
-            dist/SHA256SUMS-macos.txt
+            dist/SHA256SUMS-macos-aarch64.txt
+            dist/WongTools-macos-x64.zip
+            dist/WongTools-macos-x64.dmg
+            dist/SHA256SUMS-macos-x64.txt
 
-  # 汇总发布：三个平台包齐了才建 Release，避免三作业并行各建各的打架。
+  # 汇总发布：各平台包齐了才建 Release，避免多作业并行各建各的打架。
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [package]
@@ -136,7 +154,11 @@ jobs:
           path: release
       - uses: actions/download-artifact@v4
         with:
-          name: wong-tools-macos
+          name: wong-tools-macos-aarch64
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: wong-tools-macos-x64
           path: release
       - uses: softprops/action-gh-release@v2
         with:
