@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 arboard = "3.6"
+chrono = "0.4"
 global-hotkey = "0.6.4"
 gpui-kit = "0.7.1"
 image = "0.25"

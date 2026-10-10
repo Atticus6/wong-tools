@@ -149,7 +149,7 @@ impl LogSink {
         }
     }
 
-    /// 快照（界面读，老的在前，重启自动回来）。
+    /// 快照（界面读，新的在前，重启自动回来）。
     pub fn snapshot(&self) -> Vec<LogEntry> {
         crate::settings::airelay_requests()
             .into_iter()
@@ -548,10 +548,15 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// 毫秒时间戳转 HH:MM:SS（请求表时间列展示用）。
+/// 毫秒时间戳转本地 HH:MM:SS（请求表时间列展示用，跟系统时区走；
+/// 直接 mod 86400 会显示 UTC，东八区差 8 小时）。
 pub(crate) fn clock(ms: u64) -> String {
-    let secs = ms / 1000 % 86400;
-    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "--:--:--".to_string())
 }
 
 fn accept_loop(
@@ -1255,7 +1260,7 @@ fn write_truncated_chat(
     let _ = write_json(stream, 200, &body);
 }
 
-/// 一轮 responses（下游流式也要先攒完再重放，zen-gate 同款）。
+/// 一轮 responses（流式逐帧直发 / 非流式攒完再重放）。
 fn handle_responses(
     stream: &mut TcpStream,
     req: &Value,
@@ -1306,6 +1311,10 @@ fn handle_responses(
             return;
         }
     };
+    if sse {
+        stream_responses(stream, &attempts, &url, &headers, &body_text, &rename, wire, &base, &model_raw, log, tunnel);
+        return;
+    }
     // responses 先攒完再重放：干净失败直接扔缓冲换下一个（限流额外跳过同服）。
     let mut tried: HashSet<String> = HashSet::new();
     let mut dead_servers: HashSet<String> = HashSet::new();
@@ -1410,7 +1419,122 @@ fn handle_responses(
     }
 }
 
-/// responses 重放事件（created → 每块 added/delta/done → completed/incomplete）。
+/// 一轮 responses 流式：逐帧翻译直发，头懒写（`response.created` 没出去前
+/// 都能改状态码，chat/messages 同款）。首帧没出来前的失败都算干净，
+/// 扔了换下一个节点；出来后的失败按已有内容照常收尾，不再试。
+/// 收尾帧沿用 `responses_replay` 最后一帧，和缓冲路径一字不差。
+#[allow(clippy::too_many_arguments)]
+fn stream_responses(
+    stream: &mut TcpStream,
+    attempts: &[Attempt],
+    url: &str,
+    headers: &[(String, String)],
+    body_text: &str,
+    rename: &HashMap<String, String>,
+    wire: Wire,
+    base: &str,
+    model_raw: &str,
+    log: &LogSink,
+    tunnel: &PrivateTunnel,
+) {
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut dead_servers: HashSet<String> = HashSet::new();
+    let mut executed = 0;
+    let mut last_fail: Option<(u16, String)> = None;
+    'attempts: for attempt in attempts {
+        if tried.contains(&attempt.node)
+            || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+        {
+            continue;
+        }
+        if executed >= MAX_ATTEMPTS {
+            break;
+        }
+        executed += 1;
+        let t0 = now_ms();
+        let _fg = if attempt.kind == AttemptKind::Pinned {
+            let guard = tunnel.lock_failover();
+            if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "responses", model_raw.to_string(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        let mut upstream = match open_upstream(url, headers, body_text, attempt_proxy_url(attempt).as_deref()) {
+            Ok(u) => u,
+            Err(EarlyError::Transport(e)) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "responses", model_raw.to_string(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Err(EarlyError::Http(code, msg)) => {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
+                log_done(log, t0, "responses", model_raw.to_string(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((code, msg));
+                continue 'attempts;
+            }
+        };
+        let status = upstream.status;
+        let mut decoder = Decoder::new(wire, rename.clone());
+        let mut failed: Option<(u16, String)> = None;
+        let mut head_sent = false;
+        let mut emitter = ResponsesEmitter::default();
+        let resp_id = format!("resp_{}", rand_hex12());
+        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+            for frame in emitter.push(chunk) {
+                send_resp_head(stream, &mut head_sent, &resp_id, base)
+                    .map_err(|e| format!("写头失败: {e}"))?;
+                sse_frame(stream, &frame).map_err(|e| format!("写帧失败: {e}"))?;
+            }
+            Ok(())
+        };
+        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+        if let Some((code, msg)) = failed.clone() {
+            tried.insert(attempt.node.clone());
+            if code == 429 {
+                dead_servers.insert(attempt.server.clone());
+            }
+            if !emitter.has_any() {
+                log_done(log, t0, "responses", model_raw.to_string(), "ERR".to_string(), msg.clone(), &decoder.usage(), &attempt.node);
+                last_fail = Some((code, msg));
+                continue 'attempts;
+            }
+            // 有输出：按已有内容照常收尾（下面统一走）。
+        }
+        let (finish, usage) = match drained {
+            Err(e) => {
+                tried.insert(attempt.node.clone());
+                if !emitter.has_any() {
+                    log_done(log, t0, "responses", model_raw.to_string(), "ERR".to_string(), e.clone(), &decoder.usage(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                (String::new(), decoder.usage())
+            }
+            Ok(pair) => pair,
+        };
+        let _ = send_resp_head(stream, &mut head_sent, &resp_id, base);
+        if let Some(tail) = responses_replay(&emitter.done_blocks, &resp_id, base, &finish, &usage).pop() {
+            let _ = sse_frame(stream, &tail);
+        }
+        let _ = sse_done(stream);
+        let log_finish = if finish.as_str() == "max-tokens" { "length".to_string() } else { "stop".to_string() };
+        log_done(log, t0, "responses", model_raw.to_string(), log_finish, failed.map(|(_, m)| m).unwrap_or_default(), &usage, &attempt.node);
+        return;
+    }
+    // 耗尽：干净失败保证头没出去，直接回 JSON 错误。
+    if let Some((code, msg)) = last_fail {
+        let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
+    }
+}
 fn responses_replay(
     blocks: &[CollectBlock],
     resp_id: &str,
@@ -1953,6 +2077,169 @@ impl AnthropicEmitter {
     }
 }
 
+/// responses 流式头懒写：`response.created` 没出去前都能改状态码（chat 同款）。
+/// 独立函数（闭包借 `head_sent` 会和后面的读打架）。
+fn send_resp_head(
+    stream: &mut TcpStream,
+    head_sent: &mut bool,
+    resp_id: &str,
+    model: &str,
+) -> std::io::Result<()> {
+    if *head_sent {
+        return Ok(());
+    }
+    write_response(stream, 200, "", true)?;
+    sse_frame(
+        stream,
+        &serde_json::json!({
+            "type": "response.created",
+            "response": {"id": resp_id, "object": "response", "status": "in_progress", "model": model},
+        }),
+    )?;
+    *head_sent = true;
+    Ok(())
+}
+
+/// responses 流式发射器：Chunk 进、官方 SSE 条目事件出，块序号自增。
+/// 事件顺序和 `responses_replay` 一致（added → delta* → done），只是按帧拆开；
+/// 文本边攒边发，`done` 事件带全量（官方形状要求）；收尾的 completed 沿用
+/// `responses_replay` 最后一帧，保证流式/缓冲终局一字不差。
+#[derive(Debug, Default)]
+struct ResponsesEmitter {
+    /// 已开块数（= 下一块序号）。
+    index: usize,
+    /// 当前块序号（没开块时无意义）。
+    open_oidx: i64,
+    /// 当前块种类（没开块时 None）。
+    open_kind: Option<BlockKind>,
+    /// 当前块 item id（`msg_` / `rs_` / `fc_` + 序号）。
+    open_item: String,
+    /// 当前块上游调用 id（工具块用）。
+    open_call_id: String,
+    /// 当前块工具名（工具块用）。
+    open_name: String,
+    /// 当前块已攒文本（`done` 事件和收尾 `output` 用）。
+    open_text: String,
+    /// 已关块（顺序同开块，收尾 `output` 数组用）。
+    done_blocks: Vec<CollectBlock>,
+    /// 是否吐过任何帧（干净失败判定用）。
+    any: bool,
+}
+
+impl ResponsesEmitter {
+    fn has_any(&self) -> bool {
+        self.any
+    }
+
+    fn push(&mut self, chunk: &Chunk) -> Vec<Value> {
+        let mut out = Vec::new();
+        match chunk {
+            Chunk::BlockStart { kind, id, name } => {
+                let oidx = self.index as i64;
+                self.index += 1;
+                self.open_oidx = oidx;
+                self.open_kind = Some(*kind);
+                self.open_text.clear();
+                let (item_id, added) = match kind {
+                    BlockKind::Text => {
+                        let item_id = format!("msg_{oidx}");
+                        let event = serde_json::json!({
+                            "type": "response.output_item.added", "output_index": oidx,
+                            "item": {"type": "message", "role": "assistant", "id": item_id,
+                                "status": "in_progress", "content": []},
+                        });
+                        (item_id, event)
+                    }
+                    BlockKind::Reasoning => {
+                        let item_id = format!("rs_{oidx}");
+                        let event = serde_json::json!({
+                            "type": "response.output_item.added", "output_index": oidx,
+                            "item": {"type": "reasoning", "id": item_id, "summary": []},
+                        });
+                        (item_id, event)
+                    }
+                    BlockKind::ToolCall => {
+                        let item_id = format!("fc_{oidx}");
+                        let event = serde_json::json!({
+                            "type": "response.output_item.added", "output_index": oidx,
+                            "item": {"type": "function_call", "id": item_id, "call_id": id,
+                                "name": name, "arguments": "", "status": "in_progress"},
+                        });
+                        (item_id, event)
+                    }
+                };
+                self.open_item = item_id;
+                self.open_call_id = id.clone();
+                self.open_name = name.clone();
+                self.any = true;
+                out.push(added);
+            }
+            Chunk::TextDelta(delta) => {
+                if self.open_kind == Some(BlockKind::Text) {
+                    self.open_text.push_str(delta);
+                    self.any = true;
+                    out.push(serde_json::json!({
+                        "type": "response.output_text.delta", "output_index": self.open_oidx,
+                        "item_id": self.open_item, "delta": delta,
+                    }));
+                }
+            }
+            Chunk::ReasonDelta(delta) => {
+                if self.open_kind == Some(BlockKind::Reasoning) {
+                    self.open_text.push_str(delta);
+                    self.any = true;
+                    out.push(serde_json::json!({
+                        "type": "response.reasoning_text.delta", "output_index": self.open_oidx,
+                        "item_id": self.open_item, "delta": delta,
+                    }));
+                }
+            }
+            Chunk::ToolCallDelta { delta, .. } => {
+                if self.open_kind == Some(BlockKind::ToolCall) {
+                    self.open_text.push_str(delta);
+                    self.any = true;
+                    out.push(serde_json::json!({
+                        "type": "response.function_call_arguments.delta", "output_index": self.open_oidx,
+                        "item_id": self.open_item, "delta": delta,
+                    }));
+                }
+            }
+            Chunk::BlockEnd => {
+                if let Some(kind) = self.open_kind.take() {
+                    let text = std::mem::take(&mut self.open_text);
+                    let done = match kind {
+                        BlockKind::Text => serde_json::json!({
+                            "type": "response.output_item.done", "output_index": self.open_oidx,
+                            "item": {"type": "message", "role": "assistant", "id": self.open_item,
+                                "status": "completed",
+                                "content": [{"type": "output_text", "text": text}]},
+                        }),
+                        BlockKind::Reasoning => serde_json::json!({
+                            "type": "response.output_item.done", "output_index": self.open_oidx,
+                            "item": {"type": "reasoning", "id": self.open_item, "summary": []},
+                        }),
+                        BlockKind::ToolCall => serde_json::json!({
+                            "type": "response.output_item.done", "output_index": self.open_oidx,
+                            "item": {"type": "function_call", "id": self.open_item,
+                                "call_id": self.open_call_id, "name": self.open_name,
+                                "arguments": text},
+                        }),
+                    };
+                    self.done_blocks.push(CollectBlock {
+                        kind,
+                        id: std::mem::take(&mut self.open_call_id),
+                        name: std::mem::take(&mut self.open_name),
+                        text,
+                    });
+                    self.any = true;
+                    out.push(done);
+                }
+            }
+        }
+        out
+    }
+}
+
 fn models_body(ids: &[String]) -> Value {
     serde_json::json!({
         "object": "list",
@@ -2182,6 +2469,86 @@ mod tests {
         assert!(err.contains("REJECT"), "拦截原因要写清：{err}");
     }
 
+    #[test]
+    fn clock_follows_system_timezone() {
+        // 本地钟：和系统时区一致（UTC 直显的旧实现在东八区差 8 小时）。
+        // 形状 + 确定性 + 和 Local 对拍（±1 秒容忍跨秒抖动）。
+        use chrono::TimeZone as _;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            / 1000
+            * 1000;
+        let to_secs = |s: &str| -> i64 {
+            let p: Vec<i64> = s.split(':').map(|x| x.parse().unwrap_or(-1)).collect();
+            p[0] * 3600 + p[1] * 60 + p[2]
+        };
+        let got = super::clock(ms);
+        assert_eq!(got.len(), 8, "HH:MM:SS 形状：{got}");
+        assert_eq!(super::clock(ms), got, "同一毫秒两次一致");
+        let expect = chrono::Local
+            .timestamp_millis_opt(ms as i64)
+            .single()
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .expect("当前毫秒必合法");
+        assert!(
+            (to_secs(&got) - to_secs(&expect)).abs() <= 1,
+            "本地钟对不上：{got} vs {expect}"
+        );
+    }
+
+    #[test]
+    fn responses_emitter_streams_item_events_in_order() {
+        // 文本块：added → delta → done，序号自增；done 带全量文本。
+        // 工具块：参数边攒边发，done 带全量 arguments。
+        // 收尾帧沿用 responses_replay，和缓冲路径同一形状。
+        use super::ResponsesEmitter;
+        use crate::tools::airelay::zen::BlockKind;
+        use crate::tools::airelay::zen::Chunk;
+        use crate::tools::airelay::zen::Usage;
+        let mut emitter = ResponsesEmitter::default();
+        assert!(!emitter.has_any(), "没吐过帧不算有输出");
+        let frames = emitter.push(&Chunk::BlockStart {
+            kind: BlockKind::Text,
+            id: String::new(),
+            name: String::new(),
+        });
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"].as_str(), Some("response.output_item.added"));
+        assert_eq!(frames[0]["output_index"], 0);
+        let frames = emitter.push(&Chunk::TextDelta("hi ".to_string()));
+        assert_eq!(frames[0]["type"].as_str(), Some("response.output_text.delta"));
+        assert_eq!(frames[0]["delta"].as_str(), Some("hi "));
+        assert!(emitter.has_any());
+        let frames = emitter.push(&Chunk::BlockEnd);
+        assert_eq!(frames[0]["type"].as_str(), Some("response.output_item.done"));
+        assert_eq!(frames[0]["item"]["content"][0]["text"].as_str(), Some("hi "));
+        let frames = emitter.push(&Chunk::BlockStart {
+            kind: BlockKind::ToolCall,
+            id: "call_1".to_string(),
+            name: "read".to_string(),
+        });
+        assert_eq!(frames[0]["output_index"], 1);
+        assert_eq!(frames[0]["item"]["name"].as_str(), Some("read"));
+        let frames = emitter.push(&Chunk::ToolCallDelta {
+            key: "0".to_string(),
+            delta: "{\"p\":1}".to_string(),
+        });
+        assert_eq!(
+            frames[0]["type"].as_str(),
+            Some("response.function_call_arguments.delta")
+        );
+        let frames = emitter.push(&Chunk::BlockEnd);
+        assert_eq!(frames[0]["item"]["arguments"].as_str(), Some("{\"p\":1}"));
+        assert_eq!(emitter.done_blocks.len(), 2);
+        let tail = super::responses_replay(&emitter.done_blocks, "resp_x", "m", "stop", &Usage::default())
+            .pop()
+            .expect("有收尾帧");
+        assert_eq!(tail["type"].as_str(), Some("response.completed"));
+        assert_eq!(tail["response"]["output"].as_array().map(|a| a.len()), Some(2));
+    }
+
             #[test]
     fn gateway_serves_models_and_rejects_bad_requests_locally() {
         // 本地回环实测（不碰上游）：起服务 → 模型表有形状 → 非法请求 400 → 关得掉。
@@ -2262,15 +2629,15 @@ mod tests {
         }
         let snap = sink.snapshot();
         assert_eq!(snap.len(), 100, "只留最新 100 条");
-        assert_eq!(snap[0].model, "m20");
-        assert_eq!(snap[0].at_ms, 1020);
+        assert_eq!(snap[0].model, "m119", "新的在前");
+        assert_eq!(snap[0].at_ms, 1119);
         assert_eq!(snap[0].input_tokens, 10, "token 进库");
         assert_eq!(snap[0].output_tokens, 5, "token 进库");
         assert_eq!(snap[0].cache_tokens, 2, "缓存 token 进库");
-        assert_eq!(snap[0].node, "n20", "节点名进库");
+        assert_eq!(snap[0].node, "n119", "节点名进库");
         // 持久化：新槽读回同一批（重启不丢）。
         let snap2 = LogSink::default().snapshot();
         assert_eq!(snap2.len(), 100, "换槽重读还在");
-        assert_eq!(snap2[99].model, "m119");
+        assert_eq!(snap2[99].model, "m20");
     }
 }

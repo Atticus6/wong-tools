@@ -312,6 +312,8 @@ impl WsShell {
             .flex()
             .flex_1()
             .min_h_0()
+            // 同外壳：横向能收，宽表才有确定宽度出横滚。
+            .min_w_0()
             .flex_col()
             .px(px(16.))
             .py(px(12.))
@@ -579,6 +581,8 @@ impl WsShell {
             .flex()
             .flex_1()
             .min_h_0()
+            // 横向能收：表格宽度被夹住，超宽列走表内横滚。
+            .min_w_0()
             .flex_col()
             .gap(px(8.))
             .child(
@@ -650,6 +654,7 @@ impl WsShell {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
                     .child(
                         DataTable::new(&self.proxy.conn_table)
                             .scrollbar_visible(true, true)

@@ -9643,6 +9643,7 @@ name = "wong-tools"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "chrono",
  "global-hotkey",
  "gpui-kit",
  "image",

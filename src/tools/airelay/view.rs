@@ -161,12 +161,15 @@ impl AiRelayView {
 
 impl WsShell {
     /// AI 转发工具页：开关行 + 端口行 +（模型 / 请求）双页。
-    /// 网关启停走后台线程（端口占用立刻报错），日志靠 1 秒心跳刷。
+    /// 网关启停走后台线程（端口占用立刻报错），日志靠 1 秒心跳刷，
+    /// 切到请求页也即刷一次（没开网关时心跳没有，表会是空的）。
     pub(crate) fn render_airelay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_1()
             .min_h_0()
+            // 同外壳：横向能收，宽表才有确定宽度出横滚。
+            .min_w_0()
             .flex_col()
             .px(px(16.))
             .py(px(12.))
@@ -180,6 +183,11 @@ impl WsShell {
                     .selected_index(self.airelay.tab)
                     .on_click(cx.listener(|this, index, _, cx| {
                         this.airelay.tab = *index;
+                        // 切到请求页即刷一次：行数据平时只靠心跳（网关跑着才有），
+                        // 没开过网关切进来就是空表，标题却有数，对不上。
+                        if *index == 1 {
+                            this.refresh_req_table(cx);
+                        }
                         cx.notify();
                     }))
                     // “模型”
@@ -614,6 +622,8 @@ impl WsShell {
             .flex()
             .flex_1()
             .min_h_0()
+            // 横向能收：表格宽度被夹住，超宽列走表内横滚。
+            .min_w_0()
             .flex_col()
             .gap(px(6.))
             .child(
@@ -634,6 +644,7 @@ impl WsShell {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
                     .child(
                         DataTable::new(&self.airelay.req_table)
                             .scrollbar_visible(true, true)

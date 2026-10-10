@@ -111,7 +111,18 @@ fn db_path() -> PathBuf {
 
 // 调用方全是同步上下文（启动、点击、测试），永远不会嵌进别的 runtime，
 // 所以现建现扔，不存在嵌套 panic。
+// 全进程串行锁：libsql 本地连接不能跨线程并发用，实测并发读写会在
+// `sqlite3_close` 里 AV（网关心跳/连接线程和 UI 渲染同时进库即崩，
+// 并行测试也一样）。所有进库操作排这把锁，单次毫秒级，不卡界面。
+// 调用方都不嵌套（每个公开函数只进一次库，内部流转 `&conn`），不会死锁。
+static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn block_on<F: std::future::Future>(task: F) -> F::Output {
+    // 先排队再建 runtime：整个“开库—读写—关库”过程独占，关库时没有
+    // 别的线程在碰 SQLite，native 层就不会崩。毒化也继续（锁本身没坏）。
+    let _guard = DB_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -120,6 +131,53 @@ fn block_on<F: std::future::Future>(task: F) -> F::Output {
 }
 
 async fn open(path: &Path) -> Result<libsql::Connection, String> {
+    // 命中缓存直接克隆（Arc bump，不新开句柄）；首开走独占初始化。
+    let cache = CONN_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(shared) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+    {
+        return Ok((*shared).clone());
+    }
+    // 首开串行：锁内双检，失败不缓存（下次重试，和以前每次现开语义一致）。
+    let _init = CONN_INIT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(shared) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+    {
+        return Ok((*shared).clone());
+    }
+    let conn = open_fresh(path).await?;
+    // 引用常驻永不 drop：见 CONN_CACHE 注释。发出去的是克隆，用完即扔。
+    let shared: &'static libsql::Connection = Box::leak(Box::new(conn));
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf(), shared);
+    Ok((*shared).clone())
+}
+
+/// 按路径缓存的共享连接：libsql 0.9 本地连接在最后一次 drop 时会把同一
+/// sqlite 句柄 close 两次（`LibsqlConnection::drop` 先调一次 `disconnect`，
+/// 接着字段 `Drop` 又调一次，`disconnect` 里没有防重入），堆一 churn 就在
+/// `sqlite3_close` 里 AV（网关心跳/连接线程和 UI 渲染同时进库即崩，
+/// 并行测试也一样）。连接按路径只开一次，原件 `Box::leak` 常驻（退出也不关，
+/// 随进程收尾，无 fd 泄漏——漏的只是 Rust 壳），发出去的全是 Arc 克隆，
+/// 引用计数永不到零，close 永不触发。`block_on` 的串行锁照旧
+/// （同一句柄多线程分时用）。路径做键：测试指临时库，隔离照旧；
+/// 临时库文件删不掉会留在系统临时目录（连接还开着），无害。
+static CONN_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, &'static libsql::Connection>>,
+> = std::sync::OnceLock::new();
+/// 首开互斥（短锁只拿缓存，长活只在首开拿它，和 `DB_LOCK` 不嵌套）。
+static CONN_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 真开一次：建目录、建表、补列。幂等，首开失败直接报给调用方。
+async fn open_fresh(path: &Path) -> Result<libsql::Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("建数据目录失败: {e}"))?;
     }
@@ -668,13 +726,14 @@ pub fn log_airelay_request(entry: &StoredRequest) -> Result<(), String> {
     })
 }
 
-/// 读 AI 转发请求日志：按 id 保序（老的在前），库坏了返回空（界面摆空表）。
+/// 读 AI 转发请求日志：按 id 倒序（新的在前，界面直接展示），
+/// 库坏了返回空（界面摆空表）。
 pub fn airelay_requests() -> Vec<StoredRequest> {
     block_on(async {
         let conn = open(&db_path()).await.ok()?;
         let mut rows = conn
             .query(
-                "SELECT at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens, egress_node FROM airelay_requests ORDER BY id",
+                "SELECT at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens, egress_node FROM airelay_requests ORDER BY id DESC",
                 (),
             )
             .await
@@ -703,6 +762,7 @@ pub fn airelay_requests() -> Vec<StoredRequest> {
 
 /// 测试隔离器：把设置库指向临时文件，drop 时还原指向并删除临时文件。
 /// 必须在 `i18n::lock_locale()` 之后使用（和改 locale 的测试同串行）。
+/// 共享连接常驻不关，临时文件可能删不掉（残留系统临时目录，无害）。
 #[cfg(test)]
 pub(crate) struct TempSettings {
     path: PathBuf,
