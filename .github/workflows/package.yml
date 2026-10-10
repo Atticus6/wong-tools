@@ -92,7 +92,7 @@ jobs:
         if: matrix.target == 'windows'
         run: powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 
-      # Linux：便携 tarball + .deb（图标等美术资源有了再进包，目前无）。
+      # Linux：便携 tarball + .deb（图标进 hicolor 树，.desktop 按名认领）。
       - name: 打包 Linux
         if: matrix.target == 'linux'
         shell: bash
@@ -104,6 +104,9 @@ jobs:
           tar -czf dist/wong-tools-linux-x64.tar.gz -C dist/linux-stage wong-tools
           mkdir -p dist/deb-root/DEBIAN dist/deb-root/usr/lib/wong-tools dist/deb-root/usr/share/applications
           install -m 0755 target/release/wong-tools dist/deb-root/usr/lib/wong-tools/wong-tools
+          for s in 16 24 32 48 64 128 256 512; do
+            install -D -m 0644 "assets/icons/hicolor/${s}x${s}/apps/wong-tools.png" "dist/deb-root/usr/share/icons/hicolor/${s}x${s}/apps/wong-tools.png"
+          done
           sed "s/__VERSION__/$APP_VERSION/" packaging/deb-control > dist/deb-root/DEBIAN/control
           cp packaging/wong-tools.desktop dist/deb-root/usr/share/applications/
           dpkg-deb --root-owner-group --build dist/deb-root "dist/wong-tools_${APP_VERSION}_amd64.deb"
@@ -123,6 +126,7 @@ jobs:
           APP=dist/WongTools.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp "target/${{ matrix.rust_target }}/release/wong-tools" "$APP/Contents/MacOS/wong-tools"
+          cp assets/icons/wong-tools.icns "$APP/Contents/Resources/WongTools.icns"
           sed -e "s/__VERSION__/$APP_VERSION/" -e "s/__BUILD__/${{ github.run_number }}/" packaging/Info.plist > "$APP/Contents/Info.plist"
           ditto -c -k --keepParent "$APP" "dist/WongTools-${{ matrix.target }}.zip"
           # 暂存目录只放 .app，Applications 替身由 create-dmg 的 --app-drop-link 建。

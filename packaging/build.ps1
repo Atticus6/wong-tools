@@ -72,13 +72,14 @@ if ($null -eq $iscc) {
     throw '找不到 ISCC.exe，请先装 Inno Setup 6（https://jrsoftware.org/isdl.php），装完重跑'
 }
 
-# 在仓库根调 ISCC：exe、输出目录、中文语言包都传绝对路径，iss 里不猜相对基准。
+# 在仓库根调 ISCC：exe、图标、输出目录、中文语言包都传绝对路径，iss 里不猜相对基准。
 $stageExe = Join-Path $stage 'wong-tools.exe'
+$iconIco = Join-Path $root 'assets\icons\wong-tools.ico'
 $distDir = Join-Path $root 'dist'
 $langIsl = Join-Path $root 'packaging\ChineseSimplified.isl'
 Push-Location $root
 try {
-    & $iscc "/DMyAppVersion=$version" "/DExePath=$stageExe" "/DOutDir=$distDir" "/DLangIsl=$langIsl" $iss
+    & $iscc "/DMyAppVersion=$version" "/DExePath=$stageExe" "/DIconIco=$iconIco" "/DOutDir=$distDir" "/DLangIsl=$langIsl" $iss
     if ($LASTEXITCODE -ne 0) {
         throw "ISCC 失败，退出码 $LASTEXITCODE"
     }

@@ -7,6 +7,8 @@
   <key>CFBundleDisplayName</key><string>Wong Tools</string>
   <key>CFBundleIdentifier</key><string>com.github.atticus6.wongtools</string>
   <key>CFBundleExecutable</key><string>wong-tools</string>
+  <!-- 应用图标：CI 把 assets/icons/wong-tools.icns 拷进 Resources 并改名 WongTools.icns。 -->
+  <key>CFBundleIconFile</key><string>WongTools</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundleVersion</key><string>__BUILD__</string>

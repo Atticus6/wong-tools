@@ -10,6 +10,9 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - 打包：`packaging\build.ps1`（release 构建 + 便携 ZIP + Inno 安装包，
   版本号取 `Cargo.toml`，产物落 `dist/` 不提交；要装 Inno Setup 6，
   打包姿势见 https://gpui-kit.com/docs/packaging/)。
+  应用图标在 `assets/icons/`（`make-icons.py` 纯标准库重生成，主图 +
+  `.icns` / `.ico` / hicolor 全提交，CI 只拷贝）：mac 进 `.app` 的
+  `Resources`，win 随包安装供快捷方式指，linux 进 hicolor 树。
   推 `v*` tag 或手动点就跑 `.github/workflows/package.yml`（三平台矩阵：
   win 走 `build.ps1`，linux 出 tarball + `.deb`，mac 出 arm64/x64 双架构
   `.app` ZIP + 未签名 DMG；sccache + rust-cache 提速，包齐后汇总建一次 Release）。
