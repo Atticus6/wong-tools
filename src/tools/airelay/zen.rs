@@ -360,7 +360,14 @@ pub fn session_seed(agent: &str, user_field: &str, messages: &[Message]) -> Stri
         }
     }
     if first.len() > 500 {
-        first.truncate(500);
+        // 中文是多字节 UTF-8，500 字节很可能切在字符中间，
+        // `String::truncate` 要求落在字符边界上，否则直接 panic。
+        // 往前退到最近的合法边界（最多退 3 字节）。
+        let mut idx = 500;
+        while !first.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        first.truncate(idx);
     }
     format!("{agent}\x00{user_field}\x00{first}\x00")
 }
@@ -2699,5 +2706,25 @@ mod tests {
         assert_eq!(collector.blocks.len(), 2);
         assert_eq!(collector.blocks[0].text, "ab");
         assert_eq!(collector.blocks[1].name, "t");
+    }
+
+    #[test]
+    fn session_seed_truncates_multibyte_text_at_char_boundary() {
+        // 回归：中文 3 字节/字，500 字节正好切在字中间，
+        // 旧 `truncate(500)` 触发 `is_char_boundary` 断言 panic（airelay-conn 线程挂）。
+        use super::Message;
+        use super::Part;
+        use super::Role;
+        use super::session_seed;
+        let long = "中".repeat(300);
+        assert!(long.len() > 500, "用例必须超长");
+        assert!(!long.is_char_boundary(500), "用例必须切在字中间");
+        let seed = session_seed("agent", "user", &[Message {
+            role: Role::User,
+            parts: vec![Part::Text(long)],
+        }]);
+        let first = seed.split('\0').nth(2).expect("三段式种子");
+        assert!(first.len() <= 500, "截断后不能超 500 字节");
+        assert!(!first.is_empty(), "截断不能把内容全丢了");
     }
 }
