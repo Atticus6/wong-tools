@@ -12,6 +12,10 @@
 #ifndef OutDir
 #define OutDir "dist"
 #endif
+; 中文向导文案跟仓库走（Inno 自带目录里不一定有，见 build.ps1 传参）。
+#ifndef LangIsl
+#define LangIsl "packaging\ChineseSimplified.isl"
+#endif
 
 [Setup]
 ; 升级认这个 Id，改了它老用户会装出第二份，永远别动。
@@ -36,7 +40,7 @@ UninstallDisplayName=Wong Tools
 ; 和安装包，打完再签安装包（卸载器要走 Inno 签名卸载器流程）。
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimp"; MessagesFile: "{#LangIsl}"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项:"; Flags: unchecked
