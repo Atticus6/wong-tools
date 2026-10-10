@@ -691,22 +691,28 @@ pub fn convert_openai_messages(messages: &Value) -> Vec<Message> {
 }
 
 /// OpenAI tools（`{type:function,function:{…}}` 或扁平）转统一声明。
+/// 没名字的声明直接丢掉：调不起来，留着整轮被上游 400
+/// （`` `name` must be non-empty ``）。
 pub fn convert_openai_tools(tools: &Value) -> Vec<ToolDef> {
     let mut out = Vec::new();
     let items = tools.as_array().cloned().unwrap_or_default();
     for item in &items {
-        if let Some(function) = item.get("function") {
-            out.push(ToolDef {
+        let def = if let Some(function) = item.get("function") {
+            ToolDef {
                 name: str_field(function, "name"),
                 description: str_field(function, "description"),
                 parameters: raw_json_string(function.get("parameters").unwrap_or(&Value::Null)),
-            });
+            }
         } else {
-            out.push(ToolDef {
+            ToolDef {
                 name: str_field(item, "name"),
                 description: str_field(item, "description"),
                 parameters: raw_json_string(item.get("parameters").unwrap_or(&Value::Null)),
-            });
+            }
+        };
+        // 无名工具调不起来，留着只会连累整轮被上游拒收。
+        if !def.name.trim().is_empty() {
+            out.push(def);
         }
     }
     out
@@ -921,6 +927,7 @@ pub fn convert_anthropic(system: &Value, messages: &Value) -> Vec<Message> {
 }
 
 /// Anthropic tools（`{name,description,input_schema}`）转统一声明。
+/// 没名字的同样丢掉（同上游 `name` 非空校验）。
 pub fn convert_anthropic_tools(tools: &Value) -> Vec<ToolDef> {
     tools
         .as_array()
@@ -932,6 +939,7 @@ pub fn convert_anthropic_tools(tools: &Value) -> Vec<ToolDef> {
             description: str_field(item, "description"),
             parameters: raw_json_string(item.get("input_schema").unwrap_or(&Value::Null)),
         })
+        .filter(|def| !def.name.trim().is_empty())
         .collect()
 }
 
@@ -2428,6 +2436,8 @@ mod tests {
     use super::apply_fingerprint;
     use super::base_model_id;
     use super::classify_failure;
+    use super::convert_anthropic_tools;
+    use super::convert_openai_tools;
     use super::endpoint_for;
     use super::gateway_headers;
     use super::is_muse_spark;
@@ -2546,6 +2556,30 @@ mod tests {
         let mut body = serde_json::Map::new();
         apply_fingerprint(&mut body, "claude");
         assert_eq!(body["tool_choice"]["type"].as_str(), Some("none"));
+    }
+
+    #[test]
+    fn nameless_tool_declarations_are_dropped() {
+        // 下游混进没名字的 tool 声明（缺字段/空串/纯空白）：留着上游整轮
+        // 400（`name` must be non-empty），直接丢掉，有名的照单全收。
+        let tools = serde_json::json!([
+            {"type": "function", "function": {"name": "read", "description": "r", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"description": "没名字", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "  ", "description": "空白名", "parameters": {"type": "object"}}},
+            {"name": "glob", "description": "g", "parameters": {"type": "object"}},
+            {"description": "扁平也没名字"},
+        ]);
+        let names: Vec<String> =
+            convert_openai_tools(&tools).into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["read".to_string(), "glob".to_string()]);
+        // Anthropic 同形同坑。
+        let tools = serde_json::json!([
+            {"name": "read", "description": "r", "input_schema": {"type": "object"}},
+            {"description": "没名字"},
+        ]);
+        let names: Vec<String> =
+            convert_anthropic_tools(&tools).into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["read".to_string()]);
     }
 
     #[test]
