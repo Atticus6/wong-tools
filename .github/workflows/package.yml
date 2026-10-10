@@ -42,12 +42,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Linux 编译期系统依赖：官方 installation 在 Ubuntu 24.04 验证过的那串，
-      # 加 pkg-config/cmake 保底；webkit 是 gpui-kit 特性链要的头文件。
+      # 加 pkg-config/cmake 保底；webkit 是 gpui-kit 特性链要的头文件；
+      # pipewire 是截图库 xcap 在 Linux 下走 Wayland 录屏要的（libspa-sys
+      # 的 pkg-config 检查），libclang-dev 是 pipewire-sys 的 bindgen 要的。
       - name: 装 Linux 系统依赖
         if: matrix.target == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ clang pkg-config cmake libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev libvulkan1
+          sudo apt-get install -y gcc g++ clang libclang-dev pkg-config cmake libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev libpipewire-0.3-dev libvulkan1
 
       # Inno Setup 6：装完 ISCC 在默认路径，build.ps1 自己找得到。
       - name: 装 Inno Setup 6
