@@ -426,6 +426,9 @@ app:
   airelay_col_model:
     en: Model
     zh-CN: 模型
+  airelay_col_node:
+    en: Node
+    zh-CN: 出口
   airelay_col_tokens:
     en: Tokens
     zh-CN: Token

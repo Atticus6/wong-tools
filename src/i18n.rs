@@ -243,6 +243,7 @@ mod tests {
         "app.airelay_col_time",
         "app.airelay_col_route",
         "app.airelay_col_model",
+        "app.airelay_col_node",
         "app.airelay_col_tokens",
         "app.airelay_col_cache",
         "app.airelay_col_finish",

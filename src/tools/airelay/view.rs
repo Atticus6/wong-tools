@@ -39,6 +39,7 @@ fn req_table_columns() -> Vec<Column> {
         ("time", "app.airelay_col_time", 70.0),
         ("route", "app.airelay_col_route", 90.0),
         ("model", "app.airelay_col_model", 230.0),
+        ("node", "app.airelay_col_node", 150.0),
         ("tokens", "app.airelay_col_tokens", 110.0),
         ("cache", "app.airelay_col_cache", 90.0),
         ("finish", "app.airelay_col_finish", 90.0),
@@ -311,7 +312,8 @@ impl WsShell {
                                     // 表格 + 出站心跳：1 秒刷一次，开着才跳，
                                     // 停了自己退（running 没了就 break）。
                                     // 出站探测（连入口 + 读规则）放后台，
-                                    // 200ms 探测不能卡 UI 线程。
+                                    // 200ms 探测不能卡 UI 线程：隧道克隆在
+                                    // UI 线程拿（轻量），探测扔后台。
                                     cx.spawn(async move |this, cx| {
                                         loop {
                                             cx.background_executor()
@@ -409,9 +411,13 @@ impl WsShell {
                         .outline()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            // handle 不能进 async（借用活不过 await）：目录克隆
-                            // 出来再扔后台，回来写状态（窗口关了静默丢掉）。
-                            let Some(catalog) = this.airelay.running.as_ref().map(|h| h.catalog()) else {
+                            // handle 不能进 async（借用活不过 await）：目录和隧道
+                            // 克隆出来再扔后台，回来写状态（窗口关了静默丢掉）。
+                            let Some(catalog) = this
+                                .airelay
+                                .running
+                                .as_ref()
+                                .map(|h| h.refresh_parts().0) else {
                                 // 没开时目录就是内置表，刷它没意义。
                                 this.airelay.status = Some(t("app.airelay_stopped"));
                                 cx.notify();
@@ -529,7 +535,9 @@ impl WsShell {
                     super::server::clock(entry.at_ms),
                     entry.route.clone(),
                     entry.model.clone(),
-                    // 输入/输出放一列，缓存单列（都是 0 就 shows `-`）。
+                    // 直连没有节点，显示 `-`。
+                    if entry.node.is_empty() { "-".to_string() } else { entry.node.clone() },
+                    // 输入/输出放一列，缓存单列（都是 0 就显示 `-`）。
                     if entry.input_tokens + entry.output_tokens > 0 {
                         format!("{}/{}", entry.input_tokens, entry.output_tokens)
                     } else {

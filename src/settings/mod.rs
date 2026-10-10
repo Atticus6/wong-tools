@@ -143,13 +143,21 @@ async fn open(path: &Path) -> Result<libsql::Connection, String> {
     .await
     .map_err(|e| format!("建规则表失败: {e}"))?;
     // AI 转发请求日志：只追加不改，读按 id 保序，写时顺手裁到 100 条。
-    // 老库直接删库重建，不做列迁移（ALTER 一律不写）。
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS airelay_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, route TEXT NOT NULL, model TEXT NOT NULL, finish TEXT NOT NULL, ms INTEGER NOT NULL, err TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_tokens INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS airelay_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, route TEXT NOT NULL, model TEXT NOT NULL, finish TEXT NOT NULL, ms INTEGER NOT NULL, err TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_tokens INTEGER NOT NULL DEFAULT 0, egress_node TEXT NOT NULL DEFAULT '')",
         (),
     )
     .await
     .map_err(|e| format!("建请求表失败: {e}"))?;
+    // 老表补列：旧版建的表缺新列，补上（列已存在就报错，忽略即可）。
+    for ddl in [
+        "ALTER TABLE airelay_requests ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE airelay_requests ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE airelay_requests ADD COLUMN cache_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE airelay_requests ADD COLUMN egress_node TEXT NOT NULL DEFAULT ''",
+    ] {
+        let _ = conn.execute(ddl, ()).await;
+    }
     Ok(conn)
 }
 
@@ -624,6 +632,8 @@ pub struct StoredRequest {
     pub output_tokens: i64,
     /// 缓存命中 token。
     pub cache_tokens: i64,
+    /// 出口节点名（直连为空，失败记最后试的）。
+    pub node: String,
 }
 
 /// 写 AI 转发请求日志：追加一行，超 100 行裁掉最老的。
@@ -632,7 +642,7 @@ pub fn log_airelay_request(entry: &StoredRequest) -> Result<(), String> {
     block_on(async {
         let conn = open(&db_path()).await?;
         conn.execute(
-            "INSERT INTO airelay_requests (at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO airelay_requests (at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens, egress_node) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 libsql::Value::Integer(entry.at_ms as i64),
                 libsql::Value::Text(entry.route.clone()),
@@ -643,6 +653,7 @@ pub fn log_airelay_request(entry: &StoredRequest) -> Result<(), String> {
                 libsql::Value::Integer(entry.input_tokens),
                 libsql::Value::Integer(entry.output_tokens),
                 libsql::Value::Integer(entry.cache_tokens),
+                libsql::Value::Text(entry.node.clone()),
             ],
         )
         .await
@@ -663,7 +674,7 @@ pub fn airelay_requests() -> Vec<StoredRequest> {
         let conn = open(&db_path()).await.ok()?;
         let mut rows = conn
             .query(
-                "SELECT at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens FROM airelay_requests ORDER BY id",
+                "SELECT at_ms, route, model, finish, ms, err, input_tokens, output_tokens, cache_tokens, egress_node FROM airelay_requests ORDER BY id",
                 (),
             )
             .await
@@ -682,6 +693,7 @@ pub fn airelay_requests() -> Vec<StoredRequest> {
                 input_tokens: row.get::<i64>(6).ok().unwrap_or(0).max(0),
                 output_tokens: row.get::<i64>(7).ok().unwrap_or(0).max(0),
                 cache_tokens: row.get::<i64>(8).ok().unwrap_or(0).max(0),
+                node: row.get::<String>(9).ok().unwrap_or_default(),
             });
         }
         Some(out)

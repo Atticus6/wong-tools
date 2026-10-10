@@ -230,11 +230,16 @@ fn rand14() -> [u8; 14] {
     out
 }
 
+/// 现铸会话 id 的序号器：生产代码走确定性映射（`session_for_conversation`），
+/// 这里只给单测钉死 id 格式（上游只认形状）。allow 是显式的，不藏 warning。
+#[allow(dead_code)]
 static LAST_STAMP: AtomicI64 = AtomicI64::new(0);
+#[allow(dead_code)]
 static SEQ: AtomicI64 = AtomicI64::new(0);
 
 /// 铸会话 id（`ses_` + 12 位 hex + 14 位 base62）：时间前缀 + 单调序号，
 /// 和上游 JS 逐字节对齐，同一毫秒内序号递增。
+#[allow(dead_code)]
 pub fn mint_session_id(now_ms: i64) -> String {
     let now = if now_ms <= 0 {
         std::time::SystemTime::now()
@@ -313,6 +318,17 @@ pub fn session_for_conversation(seed: &str) -> String {
     data.extend_from_slice(seed.as_bytes());
     let (hex, b62) = sha256_hex_b62(&data);
     format!("ses_{hex}{b62}")
+}
+
+/// 单轮种子：同轮重试共用，下一轮变化（条数 | 文本总量 | 末条前 200 字）。
+/// 只定本地稳定性，上游只校验 id 格式，不认种子原文。
+pub fn turn_seed(messages: &[Message]) -> String {
+    let total: usize = messages.iter().map(|m| m.text_of().len() + 8).sum();
+    let last: String = messages
+        .last()
+        .map(|m| m.text_of().chars().take(200).collect())
+        .unwrap_or_default();
+    format!("{}|{}|{}", messages.len(), total, last)
 }
 
 /// 单轮请求 id：同轮重试共用，空种子直接现铸。

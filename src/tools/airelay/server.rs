@@ -5,6 +5,7 @@
 //! 建连 15 秒、整流 15 分钟。只绑 127.0.0.1，不鉴权（回环即边界）。
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,7 +58,7 @@ impl Catalog {
     }
 
     /// 拉新：成功换新（记实时），失败留旧的（全空才吃兜底）。
-    /// 走出站决策（代理开着就过代理拉）；阻塞 15 秒，调用方扔后台线程。
+    /// 走首选出站（代理开着就过代理拉）；阻塞 15 秒，调用方扔后台线程。
     pub fn refresh(&self) -> Result<Vec<String>, String> {
         let proxy = egress_proxy()?;
         match fetch_listing(proxy.as_deref()) {
@@ -121,6 +122,8 @@ pub struct LogEntry {
     pub output_tokens: i64,
     /// 缓存命中 token。
     pub cache_tokens: i64,
+    /// 出口节点名（直连为空，失败记最后试的）。
+    pub node: String,
 }
 
 /// 日志槽：写穿到库（`airelay_requests`，100 条封顶），读也从库读。
@@ -140,6 +143,7 @@ impl LogSink {
             input_tokens: entry.input_tokens,
             output_tokens: entry.output_tokens,
             cache_tokens: entry.cache_tokens,
+            node: entry.node,
         }) {
             eprintln!("写请求日志失败: {e}");
         }
@@ -159,6 +163,7 @@ impl LogSink {
                 input_tokens: r.input_tokens,
                 output_tokens: r.output_tokens,
                 cache_tokens: r.cache_tokens,
+                node: r.node,
             })
             .collect()
     }
@@ -185,7 +190,7 @@ impl ForcedModel {
     }
 }
 
-/// 运行中的网关：拿着停机旗、监听线程、目录缓存和强制模型，
+/// 运行中的网关：拿着停机旗、监听线程、目录缓存、强制模型和私有隧道，
 /// drop 不自动停，必须调 `stop`。
 pub struct RelayHandle {
     port: u16,
@@ -193,6 +198,7 @@ pub struct RelayHandle {
     thread: Option<JoinHandle<()>>,
     catalog: Catalog,
     forced: ForcedModel,
+    tunnel: PrivateTunnel,
 }
 
 impl RelayHandle {
@@ -204,6 +210,7 @@ impl RelayHandle {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let catalog = Catalog::new();
+        let tunnel = PrivateTunnel::default();
         let warm = catalog.clone();
         let _ = std::thread::Builder::new()
             .name("airelay-catalog".to_string())
@@ -211,13 +218,14 @@ impl RelayHandle {
                 let _ = warm.refresh();
             });
         let conn_catalog = catalog.clone();
+        let conn_tunnel = tunnel.clone();
         let forced = ForcedModel::default();
         let conn_forced = forced.clone();
         let thread = std::thread::Builder::new()
             .name("airelay-gateway".to_string())
-            .spawn(move || accept_loop(listener, stop_flag, log, conn_catalog, conn_forced))
+            .spawn(move || accept_loop(listener, stop_flag, log, conn_catalog, conn_forced, conn_tunnel))
             .map_err(|e| format!("起网关线程失败: {e}"))?;
-        Ok(Self { port, stop, thread: Some(thread), catalog, forced })
+        Ok(Self { port, stop, thread: Some(thread), catalog, forced, tunnel })
     }
 
     pub fn port(&self) -> u16 {
@@ -234,13 +242,13 @@ impl RelayHandle {
         self.catalog.snapshot()
     }
 
-    /// 目录克隆（后台刷新用，`RelayHandle` 本体不能跨线程）。
-    pub fn catalog(&self) -> Catalog {
-        self.catalog.clone()
+    /// 目录 + 隧道克隆（后台刷新用，`RelayHandle` 本体不能跨线程）。
+    pub fn refresh_parts(&self) -> (Catalog, PrivateTunnel) {
+        (self.catalog.clone(), self.tunnel.clone())
     }
 
     /// 停机：先举旗，再连一下自己把 accept 叫醒，最后等监听线程收尾。
-    /// 已建立的连接不断，让它自己流完。
+    /// 已建立的连接不断，让它自己流完；私有隧道顺手掐掉。
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let addr = format!("127.0.0.1:{}", self.port);
@@ -250,44 +258,262 @@ impl RelayHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.tunnel.shutdown();
     }
 }
 
-/// 出站决策：隧道没在听 → 直连；听着 → 按代理规则判 `opencode.ai`。
-/// DIRECT 照样裸连；REJECT 直接报错（规则说拦，硬闯没有意义）；
-/// 落节点走本地混合入口（HTTP CONNECT，入口两种协议都接）。
-/// 无延迟数据时 `url-test` 组回第一顺位（确定性，够用）。
-fn egress_proxy() -> Result<Option<String>, String> {
-    use std::net::TcpStream;
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", crate::tools::proxy::MIXED_PORT)
-        .parse()
-        .map_err(|e| format!("混合入口地址非法: {e}"))?;
-    // 隧道活着吗：直接连入口，最实在（毫秒级，关着立刻拒连）。
-    if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
-        return Ok(None);
+/// 私有隧道端口：代理工具占 10809，这里另起 10810，互不干扰。
+/// 只听回环，不碰系统代理，网关停了它也停。
+const PRIVATE_TUNNEL_PORT: u16 = 10810;
+
+/// 私有隧道槽：隧道没开但节点可用时，AI 转发自己起一条走；
+/// 代理工具开着就直接用它的（10809），不重复建。
+/// 随网关启停（`RelayHandle::stop` 顺手掐掉）。
+/// 故障转移时按节点重写活表（`pin`），并发请求用 `failover` 锁串行，
+/// 免得互相改表指错节点。
+#[derive(Clone, Default)]
+pub struct PrivateTunnel {
+    inner: Arc<Mutex<Option<(crate::tools::proxy::ProxyHandle, crate::tools::proxy::LiveRouting)>>>,
+    failover: Arc<Mutex<()>>,
+}
+
+impl PrivateTunnel {
+    /// 把活表钉到指定节点（故障转移逐个试）：组选择改成该节点后整表替换，
+    /// 下个进来的连接就走它。隧道没起就地起一条。
+    /// 调用方必须先拿 `lock_failover`，串行改表 + 请求。
+    fn pin(&self, group: &str, node: &str) -> Result<(), String> {
+        let Some(subscription) = crate::settings::proxy_subscription() else {
+            return Err("没有代理订阅".to_string());
+        };
+        let mut selections = crate::settings::proxy_selections().unwrap_or_default();
+        selections.insert(group.to_string(), node.to_string());
+        let manual = crate::settings::proxy_manual_rules();
+        let table = crate::tools::proxy::RoutingTable::build(
+            subscription,
+            &manual,
+            selections,
+            std::collections::HashMap::new(),
+        );
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_mut() {
+            Some((_, live)) => {
+                *live.write().unwrap_or_else(|p| p.into_inner()) = table;
+                Ok(())
+            }
+            None => {
+                drop(guard);
+                let live = Arc::new(std::sync::RwLock::new(table));
+                self.start_with(live)
+            }
+        }
     }
-    // 听着：订阅都没有（没拉过）当直连，别把请求憋死。
+
+    /// 用现成活表起隧道并记下句柄（端口被占但能连上就用残留的）。
+    fn start_with(
+        &self,
+        live: crate::tools::proxy::LiveRouting,
+    ) -> Result<(), String> {
+        if self.inner.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+            return Ok(());
+        }
+        let registry = Arc::new(Mutex::new(crate::tools::proxy::ConnRegistry::default()));
+        match crate::tools::proxy::start_proxy(live.clone(), registry, PRIVATE_TUNNEL_PORT) {
+            Ok(handle) => {
+                *self.inner.lock().unwrap_or_else(|p| p.into_inner()) = Some((handle, live));
+                Ok(())
+            }
+            Err(e) => {
+                // 端口被占但能连上：多半是上次崩溃的残留隧道，规则可能旧，
+                // 但请求能走——不断请求，只记一笔。
+                if probe_port(PRIVATE_TUNNEL_PORT) {
+                    eprintln!("私有隧道端口被占（{e}），用残留隧道继续");
+                    return Ok(());
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// 故障转移锁：改表 + 请求串行，免得并发请求互相指错节点。
+    /// 网关停机不经过这把锁（直接掐隧道），不会被卡住。
+    pub fn lock_failover(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.failover.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 停掉手里的私有隧道（没有就什么都不做）。
+    fn shutdown(&self) {
+        if let Some((handle, _)) = self.inner.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            handle.stop();
+        }
+    }
+}
+
+/// 探端口：连上算活着（回环拒连是毫秒级，不会卡）。
+fn probe_port(port: u16) -> bool {
+    use std::net::TcpStream;
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+/// 单次尝试上限：组再大也不超过 5 次——限流重试打多了反而更慢，
+/// 拨号超时叠起来也等不起。
+const MAX_ATTEMPTS: usize = 5;
+
+/// 一次出站尝试：走哪条路、用哪个节点。
+/// Direct 只有一种（直连没什么可换的）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Attempt {
+    kind: AttemptKind,
+    /// 节点名（Direct 为空）。
+    node: String,
+    /// 节点 server（限流时同服跳过用，Direct 为空）。
+    server: String,
+    /// 所在组（私有隧道 pin 表用，Direct/Shared 为空——Shared 走代理工具的活表）。
+    group: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptKind {
+    Direct,
+    Shared,
+    Pinned,
+}
+
+impl Attempt {
+    /// 直连尝试（无节点可试时兜底）。
+    fn direct() -> Self {
+        Self {
+            kind: AttemptKind::Direct,
+            node: String::new(),
+            server: String::new(),
+            group: String::new(),
+        }
+    }
+}
+
+/// 组内候选节点：目标组展开（嵌套递归、防环），保序去重，返回 `(节点名, server)`。
+fn group_nodes(
+    subscription: &crate::tools::proxy::Subscription,
+    group_name: &str,
+) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut out = Vec::new();
+    let mut seen_nodes = HashSet::new();
+    let mut seen_groups = HashSet::new();
+    let mut stack = vec![group_name.to_string()];
+    while let Some(name) = stack.pop() {
+        if !seen_groups.insert(name.clone()) {
+            continue;
+        }
+        let Some(group) = subscription.groups.iter().find(|g| g.name == name) else {
+            continue;
+        };
+        for member in crate::tools::proxy::resolve_members(subscription, group) {
+            match member {
+                crate::tools::proxy::GroupMember::Node(node) => {
+                    if seen_nodes.insert(node.name.clone()) {
+                        out.push((node.name.clone(), node.server.clone()));
+                    }
+                }
+                crate::tools::proxy::GroupMember::Group(nested) => {
+                    stack.push(nested.to_string());
+                }
+                crate::tools::proxy::GroupMember::Keyword(_) => {}
+            }
+        }
+    }
+    out
+}
+
+/// 出站尝试计划：先按代理规则判 `opencode.ai`。
+/// DIRECT / 没订阅 / 没节点 → 单次直连；REJECT 直接报错；
+/// 落节点 → 代理工具的隧道在听先走它（10809），再按组内逐个 pin 私有隧道。
+/// 路由命中的节点排第一，其余按组顺序；同名去重由执行循环的 `tried` 保证。
+fn plan_attempts() -> Result<Vec<Attempt>, String> {
+    // 订阅都没有（没拉过）当直连，别把请求憋死。
     let Some(subscription) = crate::settings::proxy_subscription() else {
-        return Ok(None);
+        return Ok(vec![Attempt::direct()]);
     };
     let selections = crate::settings::proxy_selections().unwrap_or_default();
     let manual = crate::settings::proxy_manual_rules();
-    let (_, route) = crate::tools::proxy::lookup_route(
-        &subscription,
-        &manual,
-        &selections,
+    // 代理工具的隧道在听先走它（活表、测速都是现成的），省一条隧道。
+    let mixed_listening = probe_port(crate::tools::proxy::MIXED_PORT);
+    plan_attempts_with(&subscription, &selections, &manual, mixed_listening)
+}
+
+/// 纯计划逻辑（好单测）：DIRECT / 没节点 → 单次直连；REJECT 报错；
+/// 落节点 → 共享隧道在先，组内逐个 pin 在后，路由命中的排第一。
+fn plan_attempts_with(
+    subscription: &crate::tools::proxy::Subscription,
+    selections: &std::collections::HashMap<String, String>,
+    manual: &[crate::tools::proxy::ManualRule],
+    mixed_listening: bool,
+) -> Result<Vec<Attempt>, String> {
+    if subscription.nodes.is_empty() {
+        return Ok(vec![Attempt::direct()]);
+    }
+    let (hits, route) = crate::tools::proxy::lookup_route(
+        subscription,
+        manual,
+        selections,
         &std::collections::HashMap::new(),
         "opencode.ai",
     );
     match route {
-        crate::tools::proxy::Route::Direct => Ok(None),
+        crate::tools::proxy::Route::Direct => Ok(vec![Attempt::direct()]),
         crate::tools::proxy::Route::Reject => {
             Err("opencode.ai 被代理规则拦截（REJECT）：改规则或关代理再试".to_string())
         }
-        crate::tools::proxy::Route::Node(_) => {
-            Ok(Some(format!("http://127.0.0.1:{}", crate::tools::proxy::MIXED_PORT)))
+        crate::tools::proxy::Route::Node(routed) => {
+            let group = hits.first().map(|h| h.target.clone()).unwrap_or_default();
+            let mut members = group_nodes(subscription, &group);
+            if members.is_empty() {
+                // 组名对不上（规则刚改过）：至少把命中的节点自己试一次。
+                members.push((routed.name.clone(), routed.server.clone()));
+            }
+            // 路由命中的排第一（稳定排序，其余保组顺序）。
+            members.sort_by_key(|(name, _)| if *name == routed.name { 0 } else { 1 });
+            let mut attempts = Vec::new();
+            if mixed_listening {
+                attempts.push(Attempt {
+                    kind: AttemptKind::Shared,
+                    node: routed.name.clone(),
+                    server: routed.server.clone(),
+                    group: String::new(),
+                });
+            }
+            for (name, server) in members {
+                attempts.push(Attempt {
+                    kind: AttemptKind::Pinned,
+                    node: name,
+                    server,
+                    group: group.clone(),
+                });
+            }
+            Ok(attempts)
         }
     }
+}
+
+/// 尝试走的代理地址：Direct 没有（裸连），Shared 走 10809，
+/// Pinned 走私有隧道 10810。
+fn attempt_proxy_url(attempt: &Attempt) -> Option<String> {
+    match attempt.kind {
+        AttemptKind::Direct => None,
+        AttemptKind::Shared => Some(format!("http://127.0.0.1:{}", crate::tools::proxy::MIXED_PORT)),
+        AttemptKind::Pinned => Some(format!("http://127.0.0.1:{PRIVATE_TUNNEL_PORT}")),
+    }
+}
+
+/// 首选出站地址（目录拉取 / 界面展示用）：取尝试计划的第一条。
+/// 无延迟数据时 `url-test` 组回第一顺位（确定性，够用）。
+fn egress_proxy() -> Result<Option<String>, String> {
+    Ok(plan_attempts()?
+        .into_iter()
+        .next()
+        .and_then(|attempt| attempt_proxy_url(&attempt)))
 }
 
 /// 出站展示文案：直连 / 代理 / 规则拦截（界面心跳读）。
@@ -334,6 +560,7 @@ fn accept_loop(
     log: LogSink,
     catalog: Catalog,
     forced: ForcedModel,
+    tunnel: PrivateTunnel,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -343,10 +570,11 @@ fn accept_loop(
         let log = log.clone();
         let catalog = catalog.clone();
         let forced = forced.clone();
+        let tunnel = tunnel.clone();
         let _ = std::thread::Builder::new()
             .name("airelay-conn".to_string())
             .spawn(move || {
-                if let Err(e) = serve_conn(stream, &log, &catalog, &forced) {
+                if let Err(e) = serve_conn(stream, &log, &catalog, &forced, &tunnel) {
                     eprintln!("网关连接失败: {e}");
                 }
             });
@@ -498,11 +726,15 @@ enum EarlyError {
     Http(u16, String),
 }
 
-fn open_upstream(url: &str, headers: &[(String, String)], body: &str) -> Result<UpstreamStream, EarlyError> {
-    // 出站先问代理：隧道开着且规则命中节点就走混合入口，否则直连；
-    // REJECT 按传输失败回（下游 502 + 原因，不进重试）。
-    let proxy = egress_proxy().map_err(EarlyError::Transport)?;
-    let agent = upstream_agent_with(proxy.as_deref()).map_err(EarlyError::Transport)?;
+fn open_upstream(
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    proxy: Option<&str>,
+) -> Result<UpstreamStream, EarlyError> {
+    // 代理地址调用方按尝试定好（Direct 没有）：这里只管建 agent。
+    // REJECT 之类在计划阶段就报错了，到不了这里。
+    let agent = upstream_agent_with(proxy).map_err(EarlyError::Transport)?;
     let mut req = agent.post(url);
     for (k, v) in headers {
         req = req.set(k, v);
@@ -623,7 +855,8 @@ fn prepare_turn(
     }
     let budget = budget_for(max_tokens);
     let session = session_for_conversation(&session_seed("wong-tools", user, &messages));
-    let request_id = mint_request_id(0);
+    // 同轮重试（故障转移换节点）共用请求 id，上游按轮计更稳。
+    let request_id = request_id_for(&session, &turn_seed(&messages));
     // 发上游前修配对：悬空调用/结果不发，免得上游整轮拒收。
     let messages = repair_tool_pairing(messages);
     let (body, rename) = build_upstream_body(wire, &base, &messages, &tools, budget);
@@ -645,6 +878,7 @@ fn log_done(
     finish: String,
     err: String,
     usage: &Usage,
+    node: &str,
 ) {
     log.push(LogEntry {
         at_ms: t0,
@@ -656,6 +890,7 @@ fn log_done(
         input_tokens: usage.input,
         output_tokens: usage.output,
         cache_tokens: usage.cache_read,
+        node: node.to_string(),
     });
 }
 
@@ -678,7 +913,15 @@ fn send_chat_head(
 }
 
 /// 一轮 chat（流式 / 非流式）。
-fn handle_chat(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0: u64, forced: &ForcedModel) {
+fn handle_chat(
+    stream: &mut TcpStream,
+    req: &Value,
+    sse: bool,
+    log: &LogSink,
+    t0: u64,
+    forced: &ForcedModel,
+    tunnel: &PrivateTunnel,
+) {
     // 早失败（400/连不上）记 0 token，后面 drain 出结果 shadow 掉。
     let usage = Usage::default();
     let max_tok = req
@@ -695,7 +938,7 @@ fn handle_chat(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0
         Ok(p) => p,
         Err(e) => {
             let _ = write_json(stream, 400, &openai_error(&e, "invalid_request_error"));
-            log_done(log, t0, "chat", String::new(), "ERR".to_string(), e, &usage);
+            log_done(log, t0, "chat", String::new(), "ERR".to_string(), e, &usage, "");
             return;
         }
     };
@@ -715,117 +958,236 @@ fn handle_chat(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let mut upstream = match open_upstream(&url, &headers, &body_text) {
-        Ok(u) => u,
-        Err(EarlyError::Transport(e)) => {
+    // 出站尝试计划（REJECT 直接 502，前后无节点可试）。
+    let attempts = match plan_attempts() {
+        Ok(a) => a,
+        Err(e) => {
             let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
-            log_done(log, t0, "chat", model_raw, "ERR".to_string(), e, &usage);
-            return;
-        }
-        Err(EarlyError::Http(code, msg)) => {
-            let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
-            log_done(log, t0, "chat", model_raw, "ERR".to_string(), msg, &usage);
+            log_done(log, t0, "chat", model_raw, "ERR".to_string(), e, &usage, "");
             return;
         }
     };
-    let status = upstream.status;
-    let mut decoder = Decoder::new(wire, rename);
-    let mut failed: Option<(u16, String)> = None;
 
     if sse {
         // 头懒写：首帧没出来前都还能改状态码（zen-gate 同款）。
-        let mut head_sent = false;
-        let mut emitter = ChatEmitter::new(&declared);
-        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
-            for frame in emitter.push(chunk, &id, created, &base) {
-                send_chat_head(stream, &mut head_sent, &id, created, &base)
-                    .map_err(|e| format!("写头失败: {e}"))?;
-                sse_frame(stream, &frame).map_err(|e| format!("写帧失败: {e}"))?;
+        // 干净失败（下游无输出）自动下一个节点；限流额外跳过同服节点
+        // （同出口 IP 额度是通的，重试同服纯属浪费）。
+        let mut tried: HashSet<String> = HashSet::new();
+        let mut dead_servers: HashSet<String> = HashSet::new();
+        let mut executed = 0;
+        let mut last_fail: Option<(u16, String)> = None;
+        'attempts: for attempt in &attempts {
+            if tried.contains(&attempt.node)
+                || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+            {
+                continue;
             }
-            Ok(())
-        };
-        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
-        // error 帧截胡：有输出按中途失败收尾，没有按整包错误回。
-        if let Some((code, msg)) = failed.clone() {
-            if emitter.has_any() {
-                let _ = send_chat_head(stream, &mut head_sent, &id, created, &base);
-                let _ = sse_frame(
-                    stream,
-                    &serde_json::json!({"error": {"message": msg, "type": error_kind_name(code), "code": code}}),
-                );
-                let _ = sse_done(stream);
-                log_done(log, t0, "chat", model_raw, "ERR".to_string(), msg, &usage);
+            if executed >= MAX_ATTEMPTS {
+                break;
+            }
+            executed += 1;
+            let t0 = now_ms();
+            // Pinned 先拿锁再 pin 表（串行改表 + 请求，免得并发指错节点）。
+            let _fg = if attempt.kind == AttemptKind::Pinned {
+                let guard = tunnel.lock_failover();
+                if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                    tried.insert(attempt.node.clone());
+                    log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                Some(guard)
             } else {
-                let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
-                log_done(log, t0, "chat", model_raw, "ERR".to_string(), msg, &usage);
-            }
-            return;
-        }
-        // 传输层断了：同上两种收尾。
-        let (finish, usage) = match drained {
-            Err(e) => {
+                None
+            };
+            let mut upstream = match open_upstream(
+                &url,
+                &headers,
+                &body_text,
+                attempt_proxy_url(attempt).as_deref(),
+            ) {
+                Ok(u) => u,
+                Err(EarlyError::Transport(e)) => {
+                    // 建连失败：节点不可用，记行换下一个。
+                    tried.insert(attempt.node.clone());
+                    log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                Err(EarlyError::Http(code, msg)) => {
+                    tried.insert(attempt.node.clone());
+                    if code == 429 {
+                        dead_servers.insert(attempt.server.clone());
+                    }
+                    log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((code, msg));
+                    continue 'attempts;
+                }
+            };
+            let status = upstream.status;
+            let mut decoder = Decoder::new(wire, rename.clone());
+            let mut failed: Option<(u16, String)> = None;
+            let mut head_sent = false;
+            let mut emitter = ChatEmitter::new(&declared);
+            let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+                for frame in emitter.push(chunk, &id, created, &base) {
+                    send_chat_head(stream, &mut head_sent, &id, created, &base)
+                        .map_err(|e| format!("写头失败: {e}"))?;
+                    sse_frame(stream, &frame).map_err(|e| format!("写帧失败: {e}"))?;
+                }
+                Ok(())
+            };
+            let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+            // error 帧截胡：有输出按中途失败收尾，没有算干净失败换下一个。
+            if let Some((code, msg)) = failed.clone() {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
                 if emitter.has_any() {
                     let _ = send_chat_head(stream, &mut head_sent, &id, created, &base);
                     let _ = sse_frame(
                         stream,
-                        &serde_json::json!({"error": {"message": e, "type": "api_error"}}),
+                        &serde_json::json!({"error": {"message": msg, "type": error_kind_name(code), "code": code}}),
                     );
                     let _ = sse_done(stream);
-                    log_done(log, t0, "chat", model_raw, "ERR".to_string(), e, &usage);
-                } else {
-                    let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
-                    log_done(log, t0, "chat", model_raw, "ERR".to_string(), e, &usage);
+                    log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), msg, &decoder.usage(), &attempt.node);
+                    return;
                 }
-                return;
+                log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), msg.clone(), &decoder.usage(), &attempt.node);
+                last_fail = Some((code, msg));
+                continue 'attempts;
             }
-            Ok(pair) => pair,
-        };
-        // 空流也给终局（按截断），不断连。
-        let _ = send_chat_head(stream, &mut head_sent, &id, created, &base);
-        let _ = sse_frame(stream, &ChatEmitter::finish_chunk(&id, created, &base, &finish));
-        if include_usage {
-            let _ = sse_frame(stream, &ChatEmitter::usage_chunk(&id, created, &base, &usage));
+            // 传输层断了：同上两种收尾。
+            let (finish, usage) = match drained {
+                Err(e) => {
+                    tried.insert(attempt.node.clone());
+                    if emitter.has_any() {
+                        let _ = send_chat_head(stream, &mut head_sent, &id, created, &base);
+                        let _ = sse_frame(
+                            stream,
+                            &serde_json::json!({"error": {"message": e, "type": "api_error"}}),
+                        );
+                        let _ = sse_done(stream);
+                        log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e, &decoder.usage(), &attempt.node);
+                        return;
+                    }
+                    log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &decoder.usage(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                Ok(pair) => pair,
+            };
+            // 空流也给终局（按截断），不断连。
+            let _ = send_chat_head(stream, &mut head_sent, &id, created, &base);
+            let _ = sse_frame(stream, &ChatEmitter::finish_chunk(&id, created, &base, &finish));
+            if include_usage {
+                let _ = sse_frame(stream, &ChatEmitter::usage_chunk(&id, created, &base, &usage));
+            }
+            let _ = sse_done(stream);
+            log_done(log, t0, "chat", model_raw.clone(), map_finish_chat(&finish).to_string(), String::new(), &usage, &attempt.node);
+            return;
         }
-        let _ = sse_done(stream);
-        log_done(log, t0, "chat", model_raw, map_finish_chat(&finish).to_string(), String::new(), &usage);
+        // 耗尽（首个尝试永不跳过，理论上到不了）：最后一次失败兜底。
+        // 干净失败保证下游无输出，直接回 JSON 错误。
+        if let Some((code, msg)) = last_fail {
+            let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
+        }
         return;
     }
 
-    // 非流式：攒完一次组装。
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut tool_calls = Vec::new();
-    let mut current_args: HashMap<usize, (String, String, String)> = HashMap::new();
-    let mut emitter = ChatEmitter::new(&declared);
-    let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
-        emitter.accumulate(chunk, &mut text, &mut reasoning, &mut tool_calls, &mut current_args);
-        Ok(())
-    };
-    let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
-    if let Some((code, msg)) = failed.clone() {
-        if emitter.has_any() {
-            // 攒包中失败但有内容：按截断返回，内容照给（zen-gate 同款）。
-            write_truncated_chat(stream, &id, created, &base, &text, &reasoning, &tool_calls, &decoder.usage());
-            log_done(log, t0, "chat", model_raw, "length".to_string(), msg, &usage);
-        } else {
-            let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
-            log_done(log, t0, "chat", model_raw, "ERR".to_string(), msg, &usage);
+    // 非流式：攒完一次组装；下游没收到任何东西之前失败都算干净，
+    // 攒的包直接扔，换下一个节点（限流额外跳过同服）。
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut dead_servers: HashSet<String> = HashSet::new();
+    let mut executed = 0;
+    let mut last_fail: Option<(u16, String)> = None;
+    // 最后一个有内容的尝试残留：耗尽时按截断交付，不浪费已到的数据。
+    let mut last_partial: Option<(String, String, Vec<Value>, Usage)> = None;
+    'attempts: for attempt in &attempts {
+        if tried.contains(&attempt.node)
+            || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+        {
+            continue;
         }
-        return;
-    }
-    let (finish, usage) = match drained {
-        Err(e) => {
-            if emitter.has_any() {
-                write_truncated_chat(stream, &id, created, &base, &text, &reasoning, &tool_calls, &decoder.usage());
-                log_done(log, t0, "chat", model_raw, "length".to_string(), e, &usage);
-            } else {
-                let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
-                log_done(log, t0, "chat", model_raw, "ERR".to_string(), e, &usage);
+        if executed >= MAX_ATTEMPTS {
+            break;
+        }
+        executed += 1;
+        let t0 = now_ms();
+        let _fg = if attempt.kind == AttemptKind::Pinned {
+            let guard = tunnel.lock_failover();
+            if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
             }
-            return;
+            Some(guard)
+        } else {
+            None
+        };
+        let mut upstream = match open_upstream(
+            &url,
+            &headers,
+            &body_text,
+            attempt_proxy_url(attempt).as_deref(),
+        ) {
+            Ok(u) => u,
+            Err(EarlyError::Transport(e)) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Err(EarlyError::Http(code, msg)) => {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
+                log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((code, msg));
+                continue 'attempts;
+            }
+        };
+        let status = upstream.status;
+        let mut decoder = Decoder::new(wire, rename.clone());
+        let mut failed: Option<(u16, String)> = None;
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut tool_calls = Vec::new();
+        let mut current_args: HashMap<usize, (String, String, String)> = HashMap::new();
+        let mut emitter = ChatEmitter::new(&declared);
+        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+            emitter.accumulate(chunk, &mut text, &mut reasoning, &mut tool_calls, &mut current_args);
+            Ok(())
+        };
+        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+        let attempt_usage = decoder.usage();
+        if let Some((code, msg)) = failed.clone() {
+            tried.insert(attempt.node.clone());
+            if code == 429 {
+                dead_servers.insert(attempt.server.clone());
+            }
+            log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), msg.clone(), &attempt_usage, &attempt.node);
+            last_fail = Some((code, msg));
+            if !text.is_empty() || !tool_calls.is_empty() {
+                last_partial = Some((text, reasoning, tool_calls, attempt_usage));
+            }
+            continue 'attempts;
         }
-        Ok(pair) => pair,
-    };
+        let (finish, usage) = match drained {
+            Err(e) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "chat", model_raw.clone(), "ERR".to_string(), e.clone(), &attempt_usage, &attempt.node);
+                last_fail = Some((502, e));
+                if !text.is_empty() || !tool_calls.is_empty() {
+                    last_partial = Some((text, reasoning, tool_calls, attempt_usage));
+                }
+                continue 'attempts;
+            }
+            Ok(pair) => pair,
+        };
     let out_finish = map_finish_chat(&finish);
     let mut msg = Map::new();
     msg.insert("role".to_string(), Value::String("assistant".to_string()));
@@ -836,17 +1198,29 @@ fn handle_chat(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0
     if !tool_calls.is_empty() {
         msg.insert("tool_calls".to_string(), Value::Array(tool_calls));
     }
-    let body = serde_json::json!({
-        "id": id, "object": "chat.completion", "created": created, "model": base,
-        "choices": [{"index": 0, "message": msg, "finish_reason": out_finish}],
-        "usage": {
-            "prompt_tokens": usage.input + usage.cache_read,
-            "completion_tokens": usage.output,
-            "total_tokens": usage.total(),
-        },
-    });
-    let _ = write_json(stream, 200, &body);
-    log_done(log, t0, "chat", model_raw, out_finish.to_string(), String::new(), &usage);
+        let body = serde_json::json!({
+            "id": id, "object": "chat.completion", "created": created, "model": base,
+            "choices": [{"index": 0, "message": msg, "finish_reason": out_finish}],
+            "usage": {
+                "prompt_tokens": usage.input + usage.cache_read,
+                "completion_tokens": usage.output,
+                "total_tokens": usage.total(),
+            },
+        });
+        let _ = write_json(stream, 200, &body);
+        log_done(log, t0, "chat", model_raw.clone(), out_finish.to_string(), String::new(), &usage, &attempt.node);
+        return;
+    }
+    // 耗尽：有残留内容截断交付（行已逐次记过，这里不再记），否则回最后一次失败。
+    if let Some((text, reasoning, tool_calls, usage)) = last_partial {
+        if !text.is_empty() || !tool_calls.is_empty() {
+            write_truncated_chat(stream, &id, created, &base, &text, &reasoning, &tool_calls, &usage);
+            return;
+        }
+    }
+    if let Some((code, msg)) = last_fail {
+        let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
+    }
 }
 
 /// 非流式截断回包（攒了一半上游断了，内容照给，终局按截断）。
@@ -882,7 +1256,15 @@ fn write_truncated_chat(
 }
 
 /// 一轮 responses（下游流式也要先攒完再重放，zen-gate 同款）。
-fn handle_responses(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0: u64, forced: &ForcedModel) {
+fn handle_responses(
+    stream: &mut TcpStream,
+    req: &Value,
+    sse: bool,
+    log: &LogSink,
+    t0: u64,
+    forced: &ForcedModel,
+    tunnel: &PrivateTunnel,
+) {
     // 早失败（400/连不上）记 0 token，后面 drain 出结果 shadow 掉。
     let usage = Usage::default();
     let model_raw = req.get("model").and_then(Value::as_str).unwrap_or("").to_string();
@@ -890,7 +1272,7 @@ fn handle_responses(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSin
     let messages = convert_responses_input(req.get("input").unwrap_or(&Value::Null), instructions);
     if messages.is_empty() {
         let _ = write_json(stream, 400, &openai_error("missing input", "invalid_request_error"));
-            log_done(log, t0, "responses", model_raw, "ERR".to_string(), "missing input".to_string(), &usage);
+            log_done(log, t0, "responses", model_raw, "ERR".to_string(), "missing input".to_string(), &usage, "");
         return;
     }
     let tools = convert_openai_tools(req.get("tools").unwrap_or(&Value::Null));
@@ -902,7 +1284,7 @@ fn handle_responses(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSin
         Ok(p) => p,
         Err(e) => {
             let _ = write_json(stream, 400, &openai_error(&e, "invalid_request_error"));
-            log_done(log, t0, "responses", model_raw, "ERR".to_string(), e, &usage);
+            log_done(log, t0, "responses", model_raw, "ERR".to_string(), e, &usage, "");
             return;
         }
     };
@@ -915,66 +1297,117 @@ fn handle_responses(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSin
             return;
         }
     };
-    let mut upstream = match open_upstream(&url, &headers, &body_text) {
-        Ok(u) => u,
-        Err(EarlyError::Transport(e)) => {
-            let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
-            log_done(log, t0, "responses", model_raw, "ERR".to_string(), e, &usage);
-            return;
-        }
-        Err(EarlyError::Http(code, msg)) => {
-            let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
-            log_done(log, t0, "responses", model_raw, "ERR".to_string(), msg, &usage);
-            return;
-        }
-    };
-    let status = upstream.status;
-    let mut decoder = Decoder::new(wire, rename);
-    let mut failed: Option<(u16, String)> = None;
-    let mut collector = BlockCollector::default();
-    let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
-        collector.feed(chunk);
-        Ok(())
-    };
-    let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
-    let resp_id = format!("resp_{}", rand_hex12());
-    // 中途失败且一块没有：整包错误。
-    let has_any = !collector.blocks.is_empty();
-    if let Some((code, msg)) = failed.clone() {
-        if !has_any {
-            let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
-            log_done(log, t0, "responses", model_raw, "ERR".to_string(), msg, &usage);
-            return;
-        }
-    }
-    let (finish, usage) = match drained {
+    // 出站尝试计划（REJECT 直接 502，前后无节点可试）。
+    let attempts = match plan_attempts() {
+        Ok(a) => a,
         Err(e) => {
-            if !has_any {
-                let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
-                log_done(log, t0, "responses", model_raw, "ERR".to_string(), e, &usage);
-                return;
-            }
-            (String::new(), decoder.usage())
-        }
-        Ok(pair) => pair,
-    };
-    let failed_msg = failed.map(|(_, m)| m).unwrap_or_default();
-    if sse {
-        if write_response(stream, 200, "", true).is_err() {
+            let _ = write_json(stream, 502, &openai_error(&e, "api_error"));
+            log_done(log, t0, "responses", model_raw, "ERR".to_string(), e, &usage, "");
             return;
         }
-        for event in responses_replay(&collector.blocks, &resp_id, &base, &finish, &usage) {
-            if sse_frame(stream, &event).is_err() {
+    };
+    // responses 先攒完再重放：干净失败直接扔缓冲换下一个（限流额外跳过同服）。
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut dead_servers: HashSet<String> = HashSet::new();
+    let mut executed = 0;
+    let mut last_fail: Option<(u16, String)> = None;
+    'attempts: for attempt in &attempts {
+        if tried.contains(&attempt.node)
+            || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+        {
+            continue;
+        }
+        if executed >= MAX_ATTEMPTS {
+            break;
+        }
+        executed += 1;
+        let t0 = now_ms();
+        let _fg = if attempt.kind == AttemptKind::Pinned {
+            let guard = tunnel.lock_failover();
+            if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "responses", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        let mut upstream = match open_upstream(
+            &url,
+            &headers,
+            &body_text,
+            attempt_proxy_url(attempt).as_deref(),
+        ) {
+            Ok(u) => u,
+            Err(EarlyError::Transport(e)) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "responses", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Err(EarlyError::Http(code, msg)) => {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
+                log_done(log, t0, "responses", model_raw.clone(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((code, msg));
+                continue 'attempts;
+            }
+        };
+        let status = upstream.status;
+        let mut decoder = Decoder::new(wire, rename.clone());
+        let mut failed: Option<(u16, String)> = None;
+        let mut collector = BlockCollector::default();
+        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+            collector.feed(chunk);
+            Ok(())
+        };
+        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+        let resp_id = format!("resp_{}", rand_hex12());
+        // 全缓冲：下游还没收到任何东西，失败一律干净，记行换下一个。
+        if let Some((code, msg)) = failed.clone() {
+            tried.insert(attempt.node.clone());
+            if code == 429 {
+                dead_servers.insert(attempt.server.clone());
+            }
+            log_done(log, t0, "responses", model_raw.clone(), "ERR".to_string(), msg.clone(), &decoder.usage(), &attempt.node);
+            last_fail = Some((code, msg));
+            continue 'attempts;
+        }
+        let (finish, usage) = match drained {
+            Err(e) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "responses", model_raw.clone(), "ERR".to_string(), e.clone(), &decoder.usage(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Ok(pair) => pair,
+        };
+        if sse {
+            if write_response(stream, 200, "", true).is_err() {
                 return;
             }
+            for event in responses_replay(&collector.blocks, &resp_id, &base, &finish, &usage) {
+                if sse_frame(stream, &event).is_err() {
+                    return;
+                }
+            }
+            let _ = sse_done(stream);
+        } else {
+            let body = responses_final(&collector.blocks, &resp_id, &base, &finish, &usage);
+            let _ = write_json(stream, 200, &body);
         }
-        let _ = sse_done(stream);
-    } else {
-        let body = responses_final(&collector.blocks, &resp_id, &base, &finish, &usage);
-        let _ = write_json(stream, 200, &body);
+        let log_finish = if finish.as_str() == "max-tokens" { "length".to_string() } else { "stop".to_string() };
+        log_done(log, t0, "responses", model_raw.clone(), log_finish, String::new(), &usage, &attempt.node);
+        return;
     }
-    let log_finish = if finish.as_str() == "max-tokens" { "length".to_string() } else { "stop".to_string() };
-    log_done(log, t0, "responses", model_raw, log_finish, failed_msg, &usage);
+    // 耗尽：最后一次失败兜底（首个尝试永不跳过，理论上到不了）。
+    if let Some((code, msg)) = last_fail {
+        let _ = write_json(stream, code, &openai_error(&msg, error_kind_name(code)));
+    }
 }
 
 /// responses 重放事件（created → 每块 added/delta/done → completed/incomplete）。
@@ -1129,7 +1562,15 @@ fn anthropic_stop_reason(finish: &str) -> &'static str {
 }
 
 /// 一轮 Anthropic messages（流式逐帧翻译 / 非流式组装）。
-fn handle_messages(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink, t0: u64, forced: &ForcedModel) {
+fn handle_messages(
+    stream: &mut TcpStream,
+    req: &Value,
+    sse: bool,
+    log: &LogSink,
+    t0: u64,
+    forced: &ForcedModel,
+    tunnel: &PrivateTunnel,
+) {
     // 早失败（400/连不上）记 0 token，后面 drain 出结果 shadow 掉。
     let usage = Usage::default();
     let model_raw = req.get("model").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1144,7 +1585,7 @@ fn handle_messages(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink
             400,
             &anthropic_error("missing messages", "invalid_request_error"),
         );
-            log_done(log, t0, "messages", model_raw, "ERR".to_string(), "missing messages".to_string(), &usage);
+            log_done(log, t0, "messages", model_raw, "ERR".to_string(), "missing messages".to_string(), &usage, "");
         return;
     }
     let tools = convert_anthropic_tools(req.get("tools").unwrap_or(&Value::Null));
@@ -1163,7 +1604,7 @@ fn handle_messages(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink
         Ok(p) => p,
         Err(e) => {
             let _ = write_json(stream, 400, &anthropic_error(&e, "invalid_request_error"));
-            log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage);
+            log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage, "");
             return;
         }
     };
@@ -1175,109 +1616,217 @@ fn handle_messages(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink
         }
     };
     let msg_id = format!("msg_{}", rand_hex12());
-    let mut upstream = match open_upstream(&url, &headers, &body_text) {
-        Ok(u) => u,
-        Err(EarlyError::Transport(e)) => {
+    // 出站尝试计划（REJECT 直接按 Anthropic 形状 502，前后无节点可试）。
+    let attempts = match plan_attempts() {
+        Ok(a) => a,
+        Err(e) => {
             let _ = write_json(stream, 502, &anthropic_error(&e, "api_error"));
-            log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage);
-            return;
-        }
-        Err(EarlyError::Http(code, msg)) => {
-            let kind = if code == 429 { "rate_limit_error" } else { "api_error" };
-            let _ = write_json(stream, code, &anthropic_error(&msg, kind));
-            log_done(log, t0, "messages", model_raw, "ERR".to_string(), msg, &usage);
+            log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage, "");
             return;
         }
     };
-    let status = upstream.status;
-    let mut decoder = Decoder::new(wire, rename);
-    let mut failed: Option<(u16, String)> = None;
 
     if sse {
-        if write_response(stream, 200, "", true).is_err() {
+        // 头懒写（首帧没出前都能改状态码）：干净失败自动下一个节点；
+        // 限流额外跳过同服节点（同出口 IP 额度是通的）。
+        let mut tried: HashSet<String> = HashSet::new();
+        let mut dead_servers: HashSet<String> = HashSet::new();
+        let mut executed = 0;
+        let mut last_fail: Option<(u16, String)> = None;
+        'attempts: for attempt in &attempts {
+            if tried.contains(&attempt.node)
+                || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+            {
+                continue;
+            }
+            if executed >= MAX_ATTEMPTS {
+                break;
+            }
+            executed += 1;
+            let t0 = now_ms();
+            let _fg = if attempt.kind == AttemptKind::Pinned {
+                let guard = tunnel.lock_failover();
+                if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                    tried.insert(attempt.node.clone());
+                    log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                Some(guard)
+            } else {
+                None
+            };
+            let mut upstream = match open_upstream(
+                &url,
+                &headers,
+                &body_text,
+                attempt_proxy_url(attempt).as_deref(),
+            ) {
+                Ok(u) => u,
+                Err(EarlyError::Transport(e)) => {
+                    tried.insert(attempt.node.clone());
+                    log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((502, e));
+                    continue 'attempts;
+                }
+                Err(EarlyError::Http(code, msg)) => {
+                    tried.insert(attempt.node.clone());
+                    if code == 429 {
+                        dead_servers.insert(attempt.server.clone());
+                    }
+                    let kind = if code == 429 { "rate_limit_error" } else { "api_error" };
+                    log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                    last_fail = Some((code, format!("{kind}: {msg}")));
+                    continue 'attempts;
+                }
+            };
+            let status = upstream.status;
+            let mut decoder = Decoder::new(wire, rename.clone());
+            let mut failed: Option<(u16, String)> = None;
+            let mut head_sent = false;
+            let mut emitter = AnthropicEmitter::default();
+            let mut saw_any = false;
+            let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+                for frame in emitter.push(chunk) {
+                    if !head_sent {
+                        send_msg_head(stream, &mut head_sent, &msg_id, &base)
+                            .map_err(|e| format!("写头失败: {e}"))?;
+                    }
+                    saw_any = true;
+                    sse_frame(stream, &frame).map_err(|e| format!("写帧失败: {e}"))?;
+                }
+                Ok(())
+            };
+            let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+            if let Some((code, msg)) = failed.clone() {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
+                if !saw_any {
+                    log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), msg.clone(), &decoder.usage(), &attempt.node);
+                    last_fail = Some((code, msg));
+                    continue 'attempts;
+                }
+                // 有输出：按 stop_reason 照常收尾（下面统一走）。
+            }
+            let (finish, usage) = match drained {
+                Err(e) => {
+                    tried.insert(attempt.node.clone());
+                    if !saw_any {
+                        log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &decoder.usage(), &attempt.node);
+                        last_fail = Some((502, e));
+                        continue 'attempts;
+                    }
+                    (String::new(), decoder.usage())
+                }
+                Ok(pair) => pair,
+            };
+            let stop = anthropic_stop_reason(&finish);
+            let _ = send_msg_head(stream, &mut head_sent, &msg_id, &base);
+            let _ = sse_frame(
+                stream,
+                &serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": stop, "stop_sequence": null},
+                    "usage": {"output_tokens": usage.output},
+                }),
+            );
+            let _ = sse_done(stream);
+            // message_stop 按官方形状补一个（zen-gate 发 stop 后不再补，这里多补无害）。
+            let _ = sse_frame(stream, &serde_json::json!({"type": "message_stop"}));
+            log_done(log, t0, "messages", model_raw.clone(), stop.to_string(), failed.map(|(_, m)| m).unwrap_or_default(), &usage, &attempt.node);
             return;
         }
-        let _ = sse_frame(
-            stream,
-            &serde_json::json!({
-                "type": "message_start",
-                "message": {"id": msg_id, "type": "message", "role": "assistant",
-                    "model": base, "content": [], "stop_sequence": null, "stop_reason": null,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}},
-            }),
-        );
-        let mut emitter = AnthropicEmitter::default();
-        let mut saw_any = false;
-        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
-            for frame in emitter.push(chunk) {
-                saw_any = true;
-                sse_frame(stream, &frame).map_err(|e| format!("写帧失败: {e}"))?;
-            }
-            Ok(())
-        };
-        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
-        if let Some((_, msg)) = failed.clone() {
-            if !saw_any {
-                let _ = sse_frame(stream, &serde_json::json!({"type": "error", "error": {"type": "api_error", "message": msg}}));
-                let _ = sse_done(stream);
-                log_done(log, t0, "messages", model_raw, "ERR".to_string(), msg, &usage);
-                return;
-            }
+        // 耗尽：最后一次失败兜底（首个尝试永不跳过，理论上到不了）。
+        // 干净失败保证 message_start 没出去，直接回 JSON 错误。
+        if let Some((_, msg)) = last_fail {
+            let _ = write_json(stream, 502, &anthropic_error(&msg, "api_error"));
         }
-        let (finish, usage) = match drained {
-            Err(e) => {
-                if !saw_any {
-                    let _ = sse_frame(stream, &serde_json::json!({"type": "error", "error": {"type": "api_error", "message": e}}));
-                    let _ = sse_done(stream);
-                    log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage);
-                    return;
-                }
-                (String::new(), decoder.usage())
-            }
-            Ok(pair) => pair,
-        };
-        let stop = anthropic_stop_reason(&finish);
-        let _ = sse_frame(
-            stream,
-            &serde_json::json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop, "stop_sequence": null},
-                "usage": {"output_tokens": usage.output},
-            }),
-        );
-        let _ = sse_done(stream);
-        // message_stop 按官方形状补一个（zen-gate 发 stop 后不再补，这里多补无害）。
-        let _ = sse_frame(stream, &serde_json::json!({"type": "message_stop"}));
-        log_done(log, t0, "messages", model_raw, stop.to_string(), failed.map(|(_, m)| m).unwrap_or_default(), &usage);
         return;
     }
 
-    // 非流式：缓冲收集器攒块再组装。
-    let mut collector = BlockCollector::default();
-    let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
-        collector.feed(chunk);
-        Ok(())
-    };
-    let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
-    if let Some((code, msg)) = failed.clone() {
-        if collector.blocks.is_empty() {
-            let kind = if code == 429 { "rate_limit_error" } else { "api_error" };
-            let _ = write_json(stream, code, &anthropic_error(&msg, kind));
-            log_done(log, t0, "messages", model_raw, "ERR".to_string(), msg, &usage);
-            return;
+    // 非流式：缓冲收集器攒块再组装；下游没收到任何东西之前失败都算干净，
+    // 扔缓冲换下一个（限流额外跳过同服）。
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut dead_servers: HashSet<String> = HashSet::new();
+    let mut executed = 0;
+    let mut last_fail: Option<(u16, String)> = None;
+    'attempts: for attempt in &attempts {
+        if tried.contains(&attempt.node)
+            || (!attempt.server.is_empty() && dead_servers.contains(&attempt.server))
+        {
+            continue;
         }
-    }
-    let (finish, usage) = match drained {
-        Err(e) => {
-            if collector.blocks.is_empty() {
-                let _ = write_json(stream, 502, &anthropic_error(&e, "api_error"));
-                log_done(log, t0, "messages", model_raw, "ERR".to_string(), e, &usage);
-                return;
+        if executed >= MAX_ATTEMPTS {
+            break;
+        }
+        executed += 1;
+        let t0 = now_ms();
+        let _fg = if attempt.kind == AttemptKind::Pinned {
+            let guard = tunnel.lock_failover();
+            if let Err(e) = tunnel.pin(&attempt.group, &attempt.node) {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
             }
-            (String::new(), decoder.usage())
+            Some(guard)
+        } else {
+            None
+        };
+        let mut upstream = match open_upstream(
+            &url,
+            &headers,
+            &body_text,
+            attempt_proxy_url(attempt).as_deref(),
+        ) {
+            Ok(u) => u,
+            Err(EarlyError::Transport(e)) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Err(EarlyError::Http(code, msg)) => {
+                tried.insert(attempt.node.clone());
+                if code == 429 {
+                    dead_servers.insert(attempt.server.clone());
+                }
+                let kind = if code == 429 { "rate_limit_error" } else { "api_error" };
+                log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), msg.clone(), &Usage::default(), &attempt.node);
+                last_fail = Some((code, format!("{kind}: {msg}")));
+                continue 'attempts;
+            }
+        };
+        let status = upstream.status;
+        let mut decoder = Decoder::new(wire, rename.clone());
+        let mut failed: Option<(u16, String)> = None;
+        let mut collector = BlockCollector::default();
+        let mut on_chunk = |chunk: &Chunk| -> Result<(), String> {
+            collector.feed(chunk);
+            Ok(())
+        };
+        let drained = drain_upstream(&mut upstream.reader, status, &mut decoder, &mut failed, &mut on_chunk);
+        if let Some((code, msg)) = failed.clone() {
+            tried.insert(attempt.node.clone());
+            if code == 429 {
+                dead_servers.insert(attempt.server.clone());
+            }
+            let kind = if code == 429 { "rate_limit_error" } else { "api_error" };
+            log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), msg.clone(), &decoder.usage(), &attempt.node);
+            last_fail = Some((code, format!("{kind}: {msg}")));
+            continue 'attempts;
         }
-        Ok(pair) => pair,
-    };
+        let (finish, usage) = match drained {
+            Err(e) => {
+                tried.insert(attempt.node.clone());
+                log_done(log, t0, "messages", model_raw.clone(), "ERR".to_string(), e.clone(), &decoder.usage(), &attempt.node);
+                last_fail = Some((502, e));
+                continue 'attempts;
+            }
+            Ok(pair) => pair,
+        };
     let stop = anthropic_stop_reason(&finish);
     let mut content = Vec::new();
     for block in &collector.blocks {
@@ -1307,16 +1856,48 @@ fn handle_messages(stream: &mut TcpStream, req: &Value, sse: bool, log: &LogSink
         },
         "created": now_unix(),
     });
-    let _ = write_json(stream, 200, &body);
-    log_done(
-        log,
-        t0,
-        "messages",
-        model_raw,
-        stop.to_string(),
-        failed.map(|(_, m)| m).unwrap_or_default(),
-        &usage,
-    );
+        let _ = write_json(stream, 200, &body);
+        log_done(
+            log,
+            t0,
+            "messages",
+            model_raw.clone(),
+            stop.to_string(),
+            String::new(),
+            &usage,
+            &attempt.node,
+        );
+        return;
+    }
+    // 耗尽：最后一次失败兜底（首个尝试永不跳过，理论上到不了）。
+    if let Some((_, msg)) = last_fail {
+        let _ = write_json(stream, 502, &anthropic_error(&msg, "api_error"));
+    }
+}
+
+/// Anthropic 流式头懒写：message_start 没出去前都能改状态码。
+/// 独立函数（闭包借标记位会和后面的读打架）。
+fn send_msg_head(
+    stream: &mut TcpStream,
+    head_sent: &mut bool,
+    msg_id: &str,
+    model: &str,
+) -> std::io::Result<()> {
+    if *head_sent {
+        return Ok(());
+    }
+    write_response(stream, 200, "", true)?;
+    sse_frame(
+        stream,
+        &serde_json::json!({
+            "type": "message_start",
+            "message": {"id": msg_id, "type": "message", "role": "assistant",
+                "model": model, "content": [], "stop_sequence": null, "stop_reason": null,
+                "usage": {"input_tokens": 0, "output_tokens": 0}},
+        }),
+    )?;
+    *head_sent = true;
+    Ok(())
 }
 
 /// Anthropic 流式发射器：块序号自增，id/name 首包带出。
@@ -1381,7 +1962,13 @@ fn models_body(ids: &[String]) -> Value {
     })
 }
 
-fn serve_conn(mut stream: TcpStream, log: &LogSink, catalog: &Catalog, forced: &ForcedModel) -> Result<(), String> {
+fn serve_conn(
+    mut stream: TcpStream,
+    log: &LogSink,
+    catalog: &Catalog,
+    forced: &ForcedModel,
+    tunnel: &PrivateTunnel,
+) -> Result<(), String> {
     let t0 = now_ms();
     let (method, path, body) = read_request(&mut stream)?;
     match (method.as_str(), path.as_str()) {
@@ -1404,21 +1991,21 @@ fn serve_conn(mut stream: TcpStream, log: &LogSink, catalog: &Catalog, forced: &
             let req: Value =
                 serde_json::from_slice(&body).map_err(|_| "请求体不是 JSON".to_string())?;
             let sse = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
-            handle_chat(&mut stream, &req, sse, log, t0, forced);
+            handle_chat(&mut stream, &req, sse, log, t0, forced, tunnel);
             Ok(())
         }
         ("POST", "/v1/responses") => {
             let req: Value =
                 serde_json::from_slice(&body).map_err(|_| "请求体不是 JSON".to_string())?;
             let sse = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
-            handle_responses(&mut stream, &req, sse, log, t0, forced);
+            handle_responses(&mut stream, &req, sse, log, t0, forced, tunnel);
             Ok(())
         }
         ("POST", "/v1/messages") => {
             let req: Value =
                 serde_json::from_slice(&body).map_err(|_| "请求体不是 JSON".to_string())?;
             let sse = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
-            handle_messages(&mut stream, &req, sse, log, t0, forced);
+            handle_messages(&mut stream, &req, sse, log, t0, forced, tunnel);
             Ok(())
         }
         _ => {
@@ -1516,8 +2103,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_parses_and_filters_to_free_lane() {
-        // 上游目录混着付费 id：只有免费进表，去重保序。
+    fn listing_parses_and_filters_to_free_lane() {        // 上游目录混着付费 id：只有免费进表，去重保序。
         let payload = serde_json::json!({
             "data": [
                 {"id": "mimo-v2.6-flash-free"},
@@ -1532,6 +2118,68 @@ mod tests {
         assert!(is_free_lane("deepseek-v4-flash-free"));
         assert!(!is_free_lane("gpt-5"));
         assert!(!is_free_lane("freebird-paid"));
+    }
+
+    #[test]
+    fn failover_plan_orders_routed_first() {
+        // 组里三节点同服（用户截图的 Oracle1-1/1-2/1-3 同款）：
+        // 路由命中的排第一，其余保组顺序，限流时调用方跳过同服。
+        use crate::tools::proxy::Matcher;
+        use crate::tools::proxy::ProxyGroup;
+        use crate::tools::proxy::ProxyNode;
+        use crate::tools::proxy::Rule;
+        use crate::tools::proxy::Subscription;
+        fn node(name: &str, server: &str) -> ProxyNode {
+            ProxyNode {
+                name: name.to_string(),
+                server: server.to_string(),
+                port: 443,
+                uuid: "4dfae26b-42b2-4c31-bed4-7836307a3986".to_string(),
+                sni: server.to_string(),
+                host: server.to_string(),
+                path: "/".to_string(),
+            }
+        }
+        let sub = Subscription {
+            nodes: vec![
+                node("新加坡Oracle1-1-c37b9", "sg.example.com"),
+                node("新加坡Oracle1-2-076aa", "sg.example.com"),
+                node("新加坡Oracle1-3-22338", "sg.example.com"),
+            ],
+            groups: vec![ProxyGroup {
+                name: "新加坡".to_string(),
+                kind: "select".to_string(),
+                members: vec![
+                    "新加坡Oracle1-1-c37b9".to_string(),
+                    "新加坡Oracle1-2-076aa".to_string(),
+                    "新加坡Oracle1-3-22338".to_string(),
+                ],
+            }],
+            rules: vec![Rule {
+                matcher: Matcher::DomainSuffix("opencode.ai".to_string()),
+                target: "新加坡".to_string(),
+            }],
+        };
+        let selections = std::collections::HashMap::new();
+        // 共享隧道没在听：全是 Pinned，命中（默认第一顺位）排第一。
+        let plans = super::plan_attempts_with(&sub, &selections, &[], false).expect("能计划");
+        assert_eq!(plans.len(), 3);
+        assert!(plans.iter().all(|p| p.kind == super::AttemptKind::Pinned));
+        assert_eq!(plans[0].node, "新加坡Oracle1-1-c37b9");
+        assert_eq!(plans[0].server, "sg.example.com");
+        // 三个同服：调用方限流时跳过同服，server 字段必须如实带出来。
+        assert!(plans.iter().all(|p| p.server == "sg.example.com"));
+        // 共享隧道在听：首个是 Shared，后面照样 pin。
+        let plans = super::plan_attempts_with(&sub, &selections, &[], true).expect("能计划");
+        assert_eq!(plans.len(), 4);
+        assert_eq!(plans[0].kind, super::AttemptKind::Shared);
+        assert_eq!(plans[0].node, "新加坡Oracle1-1-c37b9");
+        // 组名对不上：代理侧直接判拦截（分流目标对不上），计划跟着报错。
+        let mut sub2 = sub.clone();
+        sub2.rules[0].target = "不存在的组".to_string();
+        let err = super::plan_attempts_with(&sub2, &selections, &[], false)
+            .expect_err("组丢了要报错不断请求");
+        assert!(err.contains("REJECT"), "拦截原因要写清：{err}");
     }
 
             #[test]
@@ -1609,6 +2257,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cache_tokens: 2,
+                node: format!("n{i}"),
             });
         }
         let snap = sink.snapshot();
@@ -1618,6 +2267,7 @@ mod tests {
         assert_eq!(snap[0].input_tokens, 10, "token 进库");
         assert_eq!(snap[0].output_tokens, 5, "token 进库");
         assert_eq!(snap[0].cache_tokens, 2, "缓存 token 进库");
+        assert_eq!(snap[0].node, "n20", "节点名进库");
         // 持久化：新槽读回同一批（重启不丢）。
         let snap2 = LogSink::default().snapshot();
         assert_eq!(snap2.len(), 100, "换槽重读还在");
