@@ -11,6 +11,7 @@ gpui-kit = "0.7.1"
 image = "0.25"
 libsql = "0.9"
 native-tls = "0.2"
+posthog-rs = { version = "0.27.0", default-features = false, features = ["error-tracking"] }
 rand = "0.8"
 rust-i18n = "4.2"
 serde = { version = "1", features = ["derive"] }

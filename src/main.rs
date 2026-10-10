@@ -13,6 +13,7 @@ mod i18n;
 mod settings;
 mod shell;
 mod spotlight;
+mod telemetry;
 mod theme;
 mod tools;
 
@@ -194,6 +195,9 @@ fn cleanup_owned_proxy() {
 }
 
 fn main() {
+    // 崩溃上报先行：panic hook 是进程级的，放第一行，后面哪崩都抓得到。
+    // 初始化失败只记日志，应用照常启动。
+    crate::telemetry::init();
     // 完整图标集：默认 `Assets` 只内嵌了一小部分，侧边栏和标题栏的图标
     // 需要 AllAssets 才找得到。
     let app = application().with_assets(assets::AllAssets);
