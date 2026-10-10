@@ -1,0 +1,7 @@
+# nextest 配置：并行跑全量单测，代替 `cargo test` 提速。
+# 跑法：`cargo nextest run --locked`（全量）；改动单个模块时加过滤，
+# 如 `cargo nextest run --locked proxy::`。没装 nextest 的机器回落 `cargo test`。
+[profile.default]
+# 单测 60 秒没跑完即判慢并打印：正常单测都是毫秒级，卡住多半是
+# 碰了网络/桌面，早暴露别干等。
+slow-timeout = "60s"

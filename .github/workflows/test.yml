@@ -1,0 +1,38 @@
+# 单测门禁：push / PR 全跑一次 nextest。
+# 跑在 windows-latest：它是主平台，且跑者有桌面会话，截图/剪贴板那 3 个
+# 要真桌面的用例也能过（见 AGENTS，无头 Linux 会挂所以不放 ubuntu）。
+# 缓存照打包线同款：sccache 管编译、rust-cache 管 target（见 package.yml）。
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: 编译检查
+        run: cargo check --locked --all-targets 2>&1 | Select-Object -Last 40
+
+      # 全量不断言过滤：桌面那 3 个用例在跑者桌面会话里能过，
+      # 挂了就是真问题，不要加 -E 排除蒙混。
+      - name: 全量单测
+        run: cargo nextest run --locked 2>&1 | Select-Object -Last 60

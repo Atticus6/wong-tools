@@ -7,6 +7,15 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 
 - 验证：`cargo check`（首次完整编译约 2 分钟，增量只需几秒）。
 - 运行：`cargo run`。发布：`cargo build --release --locked`。
+- 编译缓存（必装）：`sccache`（`choco install sccache` / `brew install sccache`），
+  当前 shell 生效：`$env:RUSTC_WRAPPER="sccache"`（Windows，写进用户环境变量
+  一劳永逸）；mac/Linux 用 `export RUSTC_WRAPPER=sccache`。`RUSTC_WRAPPER`
+  只走环境变量、故意不进 `.cargo/config.toml`——没装 sccache 的机器会直接断构建。
+- 测试用 `cargo nextest run --locked`（`cargo install cargo-nextest --locked`
+  装一次，并行跑比 `cargo test` 快；配置在 `.config/nextest.toml`，没装才回落
+  `cargo test`）。AI 改代码时只跑相关子集（如 `cargo nextest run --locked proxy::`），
+  提交前才跑全量。CI（`.github/workflows/test.yml`）在 Windows 跑全量不断言过滤，
+  缓存和打包线同款（sccache + rust-cache）。
 - 打包：`packaging\build.ps1`（release 构建 + 便携 ZIP + Inno 安装包，
   版本号取 `Cargo.toml`，产物落 `dist/` 不提交；要装 Inno Setup 6，
   打包姿势见 https://gpui-kit.com/docs/packaging/)。
@@ -231,5 +240,6 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   引入——不要为测 UI 而加它，逻辑层先行可测。
 - 测试模块里禁止 `use super::*`：它会把 gpui 自带的 `#[test]` 宏引进
   来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
-- 提交前必须 `cargo check` 零警告 + `cargo test` 全过。测试挂了先修
+- 提交前必须 `cargo check` 零警告 + `cargo nextest run --locked` 全过
+  （没装 nextest 才回落 `cargo test`）。测试挂了先修
   测试或代码，绝不删断言蒙混过关。
