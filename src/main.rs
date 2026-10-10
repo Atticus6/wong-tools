@@ -154,6 +154,35 @@ fn window_options_with_bounds(window_bounds: WindowBounds) -> WindowOptions {
     }
 }
 
+/// `WindowBounds` 转存档：只记还原矩形 + 最大化旗，不记全屏。
+/// Windows 上 `window.bounds()` 在最大化时给的是全屏尺寸，直接存会把
+/// 还原尺寸撑大；`window.window_bounds()` 走 `GetWindowPlacement` 的
+/// `rcNormalPosition`，拿的是还原矩形，最大化退出也不存错。
+fn saved_from_window_bounds(window_bounds: WindowBounds) -> crate::settings::SavedWindowBounds {
+    let (bounds, maximized) = match window_bounds {
+        WindowBounds::Windowed(bounds) => (bounds, false),
+        WindowBounds::Maximized(bounds) => (bounds, true),
+        // 全屏没有对应的存档形态：留还原矩形，下次按普通窗口打开。
+        WindowBounds::Fullscreen(bounds) => (bounds, false),
+    };
+    crate::settings::SavedWindowBounds {
+        x: bounds.origin.x.as_f32(),
+        y: bounds.origin.y.as_f32(),
+        w: bounds.size.width.as_f32(),
+        h: bounds.size.height.as_f32(),
+        maximized,
+    }
+}
+
+/// 读窗写库一条龙：退出两条路径（关闭按钮 / 应用退出）共用。
+/// 写库失败只记一笔日志，绝不崩。
+fn persist_window_bounds(window: &Window) {
+    let saved = saved_from_window_bounds(window.window_bounds());
+    if let Err(e) = crate::settings::set_window_bounds(&saved) {
+        eprintln!("存窗口位置失败: {e}");
+    }
+}
+
 /// 关掉我们开的系统代理并落旗：启动残留清理和退出钩子共用。
 /// 只动自己开过的（旗举着才动），绝不碰用户自己的代理设置。
 /// 失败吞掉：关机时注册表可能已经不可写，尽力而为。
@@ -221,32 +250,30 @@ fn main() {
 
         // 正常退出也要清系统代理 + 存窗口位置：Drop 不一定跑（被杀更不会），
         // 钩子兜底。detach 让钩子活到进程结束，不然闭包结束就注销了。
+        // 存两处：`on_window_should_close` 管右上角关闭（窗还在，能读到矩形；
+        // `on_window_closed` 回调时窗已经没了，读不到）；`on_app_quit` 管
+        // 窗还活着的退出（菜单/快捷键/`quit()`）。两处都写，关几次存几次，
+        // 幂等不怕重复。
         open_window(window_options(cx), cx, |window, cx| {
             cx.new(|cx| shell::WsShell::new(window, cx))
         })
         .map(|(main_window, _)| {
+            // 关闭按钮路径：窗还没销毁，先把位置落盘，放行关闭。
+            let _ = main_window.update(cx, |_, window, cx| {
+                window.on_window_should_close(&*cx, |window, _| {
+                    persist_window_bounds(window);
+                    true
+                });
+            });
             // future 要求 'static 不能借 `cx`：读窗和写库都在闭包同步段做完，
             // 只回一个空 future。
             cx.on_app_quit(move |cx: &mut App| {
                 cleanup_owned_proxy();
-                // 窗口已经没了就跳过（`update` 返回 Err），不写脏数据。
-                let saved = main_window
-                    .update(cx, |_, window, _| {
-                        let bounds = window.bounds();
-                        crate::settings::SavedWindowBounds {
-                            x: bounds.origin.x.as_f32(),
-                            y: bounds.origin.y.as_f32(),
-                            w: bounds.size.width.as_f32(),
-                            h: bounds.size.height.as_f32(),
-                            maximized: window.is_maximized(),
-                        }
-                    })
-                    .ok();
-                if let Some(saved) = saved {
-                    if let Err(e) = crate::settings::set_window_bounds(&saved) {
-                        eprintln!("存窗口位置失败: {e}");
-                    }
-                }
+                // 窗口已经没了就跳过（`update` 返回 Err）：关闭按钮路径
+                // 已经存过，不写脏数据。
+                let _ = main_window.update(cx, |_, window, _| {
+                    persist_window_bounds(window);
+                });
                 async {}
             })
             .detach();
@@ -260,6 +287,7 @@ mod tests {
     // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
     // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::place_window;
+    use super::saved_from_window_bounds;
     use super::window_options_with_bounds;
     use super::DEFAULT_WIN_H;
     use super::DEFAULT_WIN_W;
@@ -376,5 +404,25 @@ mod tests {
         let placed = place_window(None, &small);
         assert_eq!(placed.bounds.size, size(px(800.), px(500.)));
         assert_eq!(placed.bounds.origin, point(px(0.), px(0.)));
+    }
+
+    #[test]
+    fn window_bounds_snapshot_keeps_restore_rect() {
+        // 存档只记还原矩形：最大化退出也不能把全屏尺寸当还原尺寸存了，
+        // 不然下次还原会撑满屏。`window.window_bounds()` 已经是还原矩形，
+        // 这里只验形态转换不丢字段。
+        let rect = Bounds {
+            origin: point(px(100.), px(120.)),
+            size: size(px(1280.), px(800.)),
+        };
+        let windowed = saved_from_window_bounds(WindowBounds::Windowed(rect));
+        assert!(!windowed.maximized);
+        assert_eq!((windowed.x, windowed.y, windowed.w, windowed.h), (100., 120., 1280., 800.));
+        let maximized = saved_from_window_bounds(WindowBounds::Maximized(rect));
+        assert!(maximized.maximized, "最大化旗不能丢");
+        assert_eq!((maximized.x, maximized.y, maximized.w, maximized.h), (100., 120., 1280., 800.));
+        let fullscreen = saved_from_window_bounds(WindowBounds::Fullscreen(rect));
+        assert!(!fullscreen.maximized, "全屏按普通窗口存，还原矩形留着");
+        assert_eq!((fullscreen.x, fullscreen.y, fullscreen.w, fullscreen.h), (100., 120., 1280., 800.));
     }
 }
