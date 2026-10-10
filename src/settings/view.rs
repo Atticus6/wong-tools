@@ -1,15 +1,14 @@
-//! 设置页视图：“语言”和“主题”两组，一行一点即切。
+//! 设置页视图：描边卡片分组，一行左标题 + 说明、右控件（官方 Settings 版式）。
 //! 持久化在 `super`（`mod.rs`）；这里只做组装。
 
-use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
-use crate::i18n::{LANGUAGES, Language, t};
+use crate::i18n::t;
 use crate::shell::{TEXT_MD, TEXT_SM, WsShell};
 
 impl WsShell {
-    /// 设置页：“语言”和“主题”两组，一行一点即切。
+    /// 设置页：语言 / 主题 / 快捷键 / 更新四组卡片。
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -22,8 +21,6 @@ impl WsShell {
             .child(self.settings_section(
                 // “语言”
                 t("app.settings_language"),
-                // “立即生效，标题栏下次启动更新”
-                t("app.settings_language_hint"),
                 self.language_rows(cx),
                 cx,
             ))
@@ -31,8 +28,6 @@ impl WsShell {
             .child(self.settings_section(
                 // “主题”
                 t("app.settings_theme"),
-                // “点击切换，立即生效”
-                t("app.settings_theme_hint"),
                 self.theme_rows(cx),
                 cx,
             ))
@@ -40,8 +35,6 @@ impl WsShell {
             .child(self.settings_section(
                 // “呼出快捷键”
                 t("app.settings_hotkey"),
-                // “全局生效，点修改后直接按下组合键”
-                t("app.settings_hotkey_hint"),
                 self.hotkey_rows(cx),
                 cx,
             ))
@@ -49,112 +42,86 @@ impl WsShell {
             .child(self.settings_section(
                 // “更新”
                 t("app.update_title"),
-                // “启动自动检查一次”
-                t("app.update_hint"),
                 self.update_rows(cx),
                 cx,
             ))
     }
 
-    /// 设置页的一组：标题 + 副提示 + 若干选项行。
+    /// 设置页的一组：描边卡片 + 组名 + 若干行。
     /// 文案走 `SharedString`：借来的 `&str` 在元素树里活不够长。
     fn settings_section(
         &self,
         title: impl Into<SharedString>,
-        hint: impl Into<SharedString>,
         rows: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = cx.theme().foreground;
+        let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let title: SharedString = title.into();
-        let hint: SharedString = hint.into();
         div()
             .flex()
             .flex_none()
             .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(div().text_size(px(TEXT_MD)).text_color(fg).child(title))
-                    .child(div().text_size(px(TEXT_SM)).text_color(muted).child(hint)),
-            )
-            .child(div().flex().flex_col().gap(px(2.)).children(rows))
+            .gap(px(10.))
+            .border_1()
+            .border_color(border)
+            .rounded(px(8.))
+            .p(px(12.))
+            .child(div().text_size(px(TEXT_MD)).text_color(muted).child(title))
+            .child(div().flex().flex_col().gap(px(10.)).children(rows))
     }
 
-    /// 设置页通用选项行：选中高亮，悬停 wash，右侧对勾标出当前项。
-    /// 标签走 `SharedString`：借来的 `&str` 在元素树里活不够长。
-    fn option_row(
-        label: impl Into<SharedString>,
-        selected: bool,
-        row_id: ElementId,
-        on_click: impl Fn(&mut WsShell, &ClickEvent, &mut Window, &mut Context<WsShell>) + 'static,
-        cx: &mut Context<WsShell>,
+    /// 组里的一行：左标题 + 说明，右控件。
+    /// 文案走 `SharedString`：借来的 `&str` 在元素树里活不够长。
+    fn setting_row(
+        title: impl Into<SharedString>,
+        desc: impl Into<SharedString>,
+        control: AnyElement,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row_bg = cx.theme().sidebar_accent;
-        let row_fg = cx.theme().sidebar_accent_foreground;
-        let idle_fg = cx.theme().sidebar_foreground;
-        let accent = cx.theme().link;
-        let label: SharedString = label.into();
-        let (bg, fg) = if selected {
-            (row_bg, row_fg)
-        } else {
-            (hsla(0., 0., 0., 0.), idle_fg)
-        };
+        let fg = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
+        let title: SharedString = title.into();
+        let desc: SharedString = desc.into();
         div()
-            .id(row_id)
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
-            .px(px(10.))
-            .h(px(32.))
-            .rounded(px(6.))
-            .bg(bg)
-            .text_color(fg)
-            .cursor_pointer()
-            .hover(move |s| {
-                if selected {
-                    s
-                } else {
-                    s.bg(row_bg)
-                }
-            })
-            .on_click(cx.listener(on_click))
-            .child(div().flex_1().text_size(px(TEXT_MD)).child(label))
-            .children(selected.then(|| Icon::new(IconName::Check).size(px(13.)).text_color(accent)))
+            // 两端对齐：控件钉死右端。注意控件再包一层普通 div：
+            // Combobox 做 flex 直接孩子时布局不正常（粘在文字后面），
+            // 包一层后左侧 flex_1 才能把它顶到右端。
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_size(px(TEXT_MD)).text_color(fg).child(title))
+                    .child(div().text_size(px(TEXT_SM)).text_color(muted).child(desc)),
+            )
+            .child(div().flex_none().child(control))
             .into_any_element()
     }
 
-    /// “语言”分组：每种语言一行（中文 / English），点即切换、即时重绘。
-    /// 行标签用各语言的自称；加新语言时 match 穷举会逼着补标签。
+    /// “语言”分组：一下拉框，选中即切；聚光面板改了语言，render 对账补回来。
     fn language_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        LANGUAGES
-            .iter()
-            .map(|lang| {
-                let lang = *lang;
-                let label = match lang {
-                    // “中文”
-                    Language::Chinese => t("app.settings_lang_zh"),
-                    // “English”
-                    Language::English => t("app.settings_lang_en"),
-                };
-                let selected = crate::i18n::language() == lang;
-                Self::option_row(
-                    label,
-                    selected,
-                    ElementId::named_usize("lang", lang as usize),
-                    move |_, _, _, cx| {
-                        crate::i18n::set_language(lang);
-                        cx.notify();
-                    },
-                    cx,
-                )
-            })
-            .collect()
+        use gpui_kit::component::Sizable as _;
+        use gpui_kit::component::combobox::Combobox;
+
+        vec![Self::setting_row(
+            // “语言”
+            t("app.settings_language"),
+            // “立即生效，标题栏下次启动更新”
+            t("app.settings_language_hint"),
+            Combobox::new(&self.lang_combo)
+                .small()
+                .w(px(200.))
+                // 菜单跟触发框等宽：默认菜单按内容撑满整行，太长。
+                .menu_width(px(200.))
+                .into_any_element(),
+            cx,
+        )]
     }
 
     /// “快捷键”分组：当前组合 + 修改/恢复默认，失败原因另起一行。
@@ -164,22 +131,17 @@ impl WsShell {
         use gpui_kit::component::button::Button;
         use gpui_kit::component::Sizable as _;
 
-        let fg = cx.theme().foreground;
         let red = cx.theme().red;
-        let mut row = div()
-            .id("hotkey-row")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(8.))
-            .px(px(10.))
-            .h(px(32.))
-            .rounded(px(6.));
         if self.spotlight.recording {
             // 录制态：提示语 + 按键捕获（`WeakEntity::update` 写回主窗口，
-            // overlay 同款）。
+            // overlay 同款），占整行。
             let weak = cx.entity().downgrade();
-            row = row
+            let row = div()
+                .id("hotkey-row")
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(32.))
                 .capture_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
                     let stroke = event.keystroke.clone();
                     let _ = weak.update(cx, |this, cx| {
@@ -190,19 +152,21 @@ impl WsShell {
                     div()
                         .flex_1()
                         .text_size(px(TEXT_MD))
-                        .text_color(fg)
                         // “按下快捷键…，Esc 取消”
                         .child(t("app.hotkey_recording")),
-                );
-        } else {
-            row = row
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(TEXT_MD))
-                        .text_color(fg)
-                        .child(crate::spotlight::display_hotkey(&self.spotlight.spec)),
                 )
+                .into_any_element();
+            return vec![row];
+        }
+        let mut rows = vec![Self::setting_row(
+            crate::spotlight::display_hotkey(&self.spotlight.spec),
+            // “全局生效，点修改后直接按下组合键”
+            t("app.settings_hotkey_hint"),
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
                 .child(
                     Button::new("hotkey-change")
                         // “修改”
@@ -238,9 +202,10 @@ impl WsShell {
                             }
                             cx.notify();
                         })),
-                );
-        }
-        let mut rows = vec![row.into_any_element()];
+                )
+                .into_any_element(),
+            cx,
+        )];
         if let Some(error) = &self.spotlight.hotkey_error {
             rows.push(
                 div()
@@ -260,74 +225,46 @@ impl WsShell {
         use gpui_kit::component::button::Button;
         use gpui_kit::component::Sizable as _;
 
-        let fg = cx.theme().foreground;
         let red = cx.theme().red;
-        let mut rows = vec![
-            div()
-                .id("update-row")
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(8.))
-                .px(px(10.))
-                .h(px(32.))
-                .rounded(px(6.))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(TEXT_MD))
-                        .text_color(fg)
-                        .child(format!(
-                            "v{} · {}",
-                            crate::updater::CURRENT_VERSION,
-                            self.update_status_text()
-                        )),
-                )
-                .child(
-                    Button::new("update-check")
-                        // “检查更新”
-                        .label(t("app.update_check"))
-                        .small()
-                        .outline()
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.check_update(cx);
-                        })),
-                )
+        let mut rows = vec![Self::setting_row(
+            format!(
+                "v{} · {}",
+                crate::updater::CURRENT_VERSION,
+                self.update_status_text()
+            ),
+            // “启动自动检查一次”
+            t("app.update_hint"),
+            Button::new("update-check")
+                // “检查更新”
+                .label(t("app.update_check"))
+                .small()
+                .outline()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.check_update(cx);
+                }))
                 .into_any_element(),
-        ];
+            cx,
+        )];
         // 有新版：下载页入口行（标题栏图标是主入口，这里再给一行）。
         if let crate::updater::UpdateState::Available { version, .. } = &self.update {
-            rows.push(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .h(px(32.))
-                    .rounded(px(6.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(TEXT_MD))
-                            .text_color(fg)
-                            // “发现新版本 v0.1.2”
-                            .child(format!("{} v{version}", t("app.update_available"))),
-                    )
-                    .child(
-                        Button::new("update-open")
-                            // “前往下载”
-                            .label(t("app.update_download"))
-                            .small()
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_update_page(cx);
-                            })),
-                    )
+            rows.push(Self::setting_row(
+                // “发现新版本 v0.1.2”
+                format!("{} v{version}", t("app.update_available")),
+                // “点击前往下载”
+                t("app.update_open_page"),
+                Button::new("update-open")
+                    // “前往下载”
+                    .label(t("app.update_download"))
+                    .small()
+                    .outline()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_update_page(cx);
+                    }))
                     .into_any_element(),
-            );
+                cx,
+            ));
         }
         // 检查失败：原因红字另起一行，下次启动或手动重试。
         if let crate::updater::UpdateState::Failed(error) = &self.update {
@@ -356,28 +293,24 @@ impl WsShell {
             }
         }
     }
-    /// “主题”分组：全部内置主题，一行一个，中文名见 themes/wong.json。
+    /// “主题”分组：一下拉框（中文名见 themes/wong.json），选中即换；
+    /// 聚光面板改了主题，render 对账补回来。
     fn theme_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        crate::theme::names()
-            .into_iter()
-            .enumerate()
-            .map(|(ix, name)| {
-                let selected = self.settings_theme == name;
-                let label = name.clone();
-                Self::option_row(
-                    label,
-                    selected,
-                    ElementId::named_usize("theme", ix),
-                    move |this, _, _, cx| {
-                        // 换主题并重绘所有窗口；名字对不上时什么都不做。
-                        if crate::theme::apply(cx, &name) {
-                            this.settings_theme = name.clone();
-                        }
-                        cx.notify();
-                    },
-                    cx,
-                )
-            })
-            .collect()
+        use gpui_kit::component::Sizable as _;
+        use gpui_kit::component::combobox::Combobox;
+
+        vec![Self::setting_row(
+            // “主题”
+            t("app.settings_theme"),
+            // “点击切换，立即生效”
+            t("app.settings_theme_hint"),
+            Combobox::new(&self.theme_combo)
+                .small()
+                .w(px(200.))
+                // 菜单跟触发框等宽：默认菜单按内容撑满整行，太长。
+                .menu_width(px(200.))
+                .into_any_element(),
+            cx,
+        )]
     }
 }

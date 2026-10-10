@@ -5,10 +5,12 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::spring;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
+use gpui_kit::component::combobox::{ComboboxEvent, ComboboxState};
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::{ActiveTheme, Icon, IndexPath, Sizable as _};
 use gpui_kit::*;
 
-use crate::i18n::t;
+use crate::i18n::{LANGUAGES, Language, t};
 
 /// Spur 度量 token。
 const TITLEBAR_H: f32 = 38.0;
@@ -195,6 +197,12 @@ pub struct WsShell {
     pub(crate) sidebar_collapsed: bool,
     /// 更新检查状态：启动查一次 + 设置页可手查；有新版标题栏右上亮图标。
     pub(crate) update: crate::updater::UpdateState,
+    /// 语言下拉状态：选中即切语言；聚光面板也能改语言，render 里对账防过期。
+    pub(crate) lang_combo: Entity<ComboboxState<SearchableVec<String>>>,
+    /// 主题下拉状态：选中即换主题；同理对账。
+    pub(crate) theme_combo: Entity<ComboboxState<SearchableVec<String>>>,
+    /// 下拉事件订阅：Subscription drop 即退订，必须活着。
+    combo_subs: Vec<Subscription>,
     pub(crate) settings_theme: String,
     /// 主窗口句柄：搜索面板执行完把主窗拉回前台用（最小化也要还原）。
     /// 构造期只记 id，不读窗口几何（那时 `bounds()` 不可靠，句柄不受影响）。
@@ -208,6 +216,30 @@ pub struct WsShell {
 impl WsShell {
     /// 创建外壳。各工具的状态在自己模块里建（要 `window` 和 `cx`）。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 语言下拉：选项是自称，选中当前语言；事件里切语言
+        // （聚光面板改了语言不经过这里，render 对账补回来）。
+        let lang_labels = Self::language_labels();
+        let lang_ix = Self::language_index();
+        let lang_selected = if lang_ix < lang_labels.len() {
+            vec![IndexPath::new(lang_ix)]
+        } else {
+            Vec::new()
+        };
+        let lang_combo = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(lang_labels), lang_selected, window, cx)
+        });
+        // 主题下拉：选项来自 themes/wong.json，选中当前主题；事件里换主题。
+        // 主题表坏了（空表）就不预选，下拉点开是空的，不崩。
+        let theme_names = crate::theme::names();
+        let theme_ix = Self::theme_index(&crate::theme::selected());
+        let theme_selected = if theme_ix < theme_names.len() {
+            vec![IndexPath::new(theme_ix)]
+        } else {
+            Vec::new()
+        };
+        let theme_combo = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(theme_names), theme_selected, window, cx)
+        });
         let mut this = Self {
             // 上次选中的工具：序号越界（工具增删）回落欢迎页。
             selected: crate::settings::selected_tool()
@@ -224,10 +256,106 @@ impl WsShell {
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
             spotlight: crate::spotlight::SpotlightView::new(cx),
             airelay: crate::tools::airelay::view::AiRelayView::new(window, cx),
+            lang_combo,
+            theme_combo,
+            // 订阅先空着，下面建完再填。
+            combo_subs: Vec::new(),
         };
+        // 下拉事件：Change 在每次点选后触发（单选随后还有 Confirm，值一样，
+        // 只认 Change）。选中即应用 + 重绘，实体自己的选中态不用再动。
+        let lang_sub = cx.subscribe(
+            &this.lang_combo,
+            |_this, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                if let ComboboxEvent::Change(values) = event {
+                    if let Some(value) = values.first() {
+                        crate::i18n::set_language(Self::language_from_label(value));
+                        cx.notify();
+                    }
+                }
+            },
+        );
+        let theme_sub = cx.subscribe(
+            &this.theme_combo,
+            |this, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                if let ComboboxEvent::Change(values) = event {
+                    if let Some(name) = values.first() {
+                        // 换主题并重绘所有窗口；名字对不上什么都不做。
+                        if crate::theme::apply(cx, name) {
+                            this.settings_theme = name.clone();
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        );
+        this.combo_subs = vec![lang_sub, theme_sub];
         // 启动查一次新版：后台跑，失败静默（标题栏不亮灯，设置页可手查）。
         this.check_update(cx);
         this
+    }
+
+    /// 语言下拉选项：各语言的自称，中英两列写的一样，locale 怎么切都不用重建。
+    fn language_labels() -> Vec<String> {
+        LANGUAGES
+            .iter()
+            .map(|lang| match lang {
+                // “中文”
+                Language::Chinese => t("app.settings_lang_zh"),
+                // “English”
+                Language::English => t("app.settings_lang_en"),
+            })
+            .collect()
+    }
+
+    /// 当前语言在下拉选项里的序号：对不上回落 0（中文）。
+    fn language_index() -> usize {
+        LANGUAGES
+            .iter()
+            .position(|lang| *lang == crate::i18n::language())
+            .unwrap_or(0)
+    }
+
+    /// 下拉值反查语言：命中英文自称即英文，否则中文（下拉里只有这两项）。
+    /// 纯函数，好单测；locale 相关的查表留在调用方。
+    fn language_from_label(value: &str) -> Language {
+        if value == t("app.settings_lang_en") {
+            Language::English
+        } else {
+            Language::Chinese
+        }
+    }
+
+    /// 当前主题在下拉选项里的序号：主题文件被改得对不上就回落 0。
+    fn theme_index(theme: &str) -> usize {
+        crate::theme::names()
+            .iter()
+            .position(|name| name == theme)
+            .unwrap_or(0)
+    }
+
+    /// 下拉选中对账：聚光面板改语言/主题不经过下拉实体，过期就在渲染前补上。
+    /// `set_selected_indices` 只写状态不发事件，严格条件（不一致才写），
+    /// 写完即收敛，不会逐帧打扰。跨实体 `update` 不和渲染借冲突，
+    /// 同实体才 panic（gpui entity_map 的 double lease 干的）。
+    fn sync_combos(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let labels = Self::language_labels();
+        let lang_ix = Self::language_index();
+        if labels.get(lang_ix).is_some() {
+            let _ = self.lang_combo.update(cx, |state, cx| {
+                if state.selected_value() != labels.get(lang_ix).cloned() {
+                    state.set_selected_indices([IndexPath::new(lang_ix)], window, cx);
+                }
+            });
+        }
+        let names = crate::theme::names();
+        let theme_ix = Self::theme_index(&self.settings_theme);
+        if names.get(theme_ix).is_some() {
+            let _ = self.theme_combo.update(cx, |state, cx| {
+                if state.selected_value() != names.get(theme_ix).cloned() {
+                    state.set_selected_indices([IndexPath::new(theme_ix)], window, cx);
+                }
+            });
+        }
     }
 
     /// 侧边栏选中并持久化：导航点击和搜索面板跳转共用，行为一致。
@@ -594,6 +722,8 @@ impl Render for WsShell {
         let fg = cx.theme().foreground;
         // 侧边栏宽一帧采一次：sidebar 和内容区网格共用，动画全程对齐。
         let sidebar_w = sidebar_width(window, cx, self.sidebar_collapsed);
+        // 下拉选中对账：聚光面板在外改了语言/主题就补上，只多一帧。
+        self.sync_combos(window, cx);
 
         div()
             .flex()
@@ -689,7 +819,8 @@ mod tests {
     // 注意：这里不要 `use super::*`——它会把 gpui 自带的 `#[test]` 宏引进
     // 来，盖住 Rust 内置的 test 属性导致递归展开失败。只显式引入用到的项。
     use super::TOOLS;
-    use crate::i18n::{LANGUAGES, language, lock_locale, set_language};
+    use super::WsShell;
+    use crate::i18n::{LANGUAGES, Language, language, lock_locale, set_language};
     use crate::settings::TempSettings;
 
     #[test]
@@ -711,6 +842,22 @@ mod tests {
                 assert!(!names.contains(&name), "侧边栏入口重名 {name}");
                 names.push(name);
             }
+        }
+        set_language(prev);
+    }
+
+    #[test]
+    fn combo_label_maps_back_to_language() {
+        // 下拉值反查：命中英文自称即英文，其他一律中文（下拉里只有这两项）。
+        // 自称两列写的一样，locale 怎么切都不影响。
+        let _guard = lock_locale();
+        let _settings = TempSettings::install("shell-lang-label");
+        let prev = language();
+        for lang in LANGUAGES {
+            set_language(*lang);
+            assert_eq!(WsShell::language_from_label("English"), Language::English);
+            assert_eq!(WsShell::language_from_label("中文"), Language::Chinese);
+            assert_eq!(WsShell::language_from_label("???"), Language::Chinese);
         }
         set_language(prev);
     }

@@ -31,8 +31,9 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   标题右侧（紧靠标题）收起按钮（官方 `SidebarToggleButton` 没透出 tooltip，
   自建同款 ghost 图标按钮）一键收起成 52px 图标列）+ 内容区。工具只剩 5 个：截图 / 代理 / AI 转发是真工具
   （状态在 `WsShell.shot` / `WsShell.proxy` / `WsShell.airelay`），
-  欢迎是占位首页，设置页是真交互（语言 / 主题切换），
-  选中态和收起态暂存 `WsShell`（收起随手持久化，启动恢复）。
+  欢迎是占位首页，设置页是真交互（语言 / 主题用 Combobox 下拉，
+  状态 entity 放 `WsShell`，选中走订阅事件应用；聚光面板也能改，
+  `render` 里对账防过期；版式照官方 Settings：描边卡片 + 左文右控件），选中态和收起态暂存 `WsShell`（收起随手持久化，启动恢复）。
 - `src/tools/`——一个工具一个文件夹，逻辑 + 视图都关在里面，跨工具
   只认 `crate::tools::<工具名>::` 路径（状态类型在 tool 根重导出，
   不直接钻 `view`）。加新工具：在此建文件夹 + `TOOLS` 登记 +
