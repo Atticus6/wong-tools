@@ -1,7 +1,7 @@
-# 打包发布：push `v*` tag 或手动触发时，在 Windows 上构建 release、
-# 打便携 ZIP + Inno 安装包；tag 触发顺手建 GitHub Release。
-# 版本号只认 Cargo.toml（packaging\build.ps1 里读），tag 只是扳机。
-# 未签名发布：要签名走 https://gpui-kit.com/docs/packaging/ 的两步流程。
+# 打包发布：push `v*` tag 或手动触发时，三平台并行构建出包；
+# tag 触发最后由 release 作业汇总建 GitHub Release（只建一次）。
+# 版本号只认 Cargo.toml，tag 只是扳机；mac 包标识见 packaging/Info.plist。
+# 未签名发布：要签名走 https://gpui-kit.com/docs/packaging/ 的流程。
 
 name: package
 
@@ -14,46 +14,122 @@ on:
 permissions:
   contents: write
 
+# sccache：编译缓存跨 run 生效，配 rust-cache（target 目录）一起用；
+# 冷编（aws-lc-sys 那种 C++ 大户）第一次躲不掉，之后增量都快。
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
 jobs:
-  windows:
-    runs-on: windows-latest
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
       - uses: Swatinem/rust-cache@v2
 
+      # Linux 编译期系统依赖：官方 installation 在 Ubuntu 24.04 验证过的那串，
+      # 加 pkg-config/cmake 保底；webkit 是 gpui-kit 特性链要的头文件。
+      - name: 装 Linux 系统依赖
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang pkg-config cmake libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev libvulkan1
+
       # Inno Setup 6：装完 ISCC 在默认路径，build.ps1 自己找得到。
-      - name: 安装 Inno Setup 6
+      - name: 装 Inno Setup 6
+        if: matrix.target == 'windows'
         run: choco install innosetup --no-progress -y
 
-      - name: 打包
+      # 版本号：三平台同一份，都从 Cargo.toml 读进环境。
+      - name: 读版本号
+        shell: bash
+        run: echo "APP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)" >> "$GITHUB_ENV"
+
+      # Windows 全套走本地同款脚本（构建 + ZIP + 安装包 + 校验和文件）。
+      - name: 打包 Windows
+        if: matrix.target == 'windows'
         run: powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 
-      # 校验和文件：跟安装包一起进 Release，用户下载完对一遍。
-      - name: 写校验和
+      # Linux：便携 tarball + .deb（图标等美术资源有了再进包，目前无）。
+      - name: 打包 Linux
+        if: matrix.target == 'linux'
+        shell: bash
         run: |
-          $lines = @()
-          $lines += ((Get-FileHash dist\wong-tools-windows-x64.zip -Algorithm SHA256).Hash.ToLower() + '  wong-tools-windows-x64.zip')
-          $setup = Get-ChildItem dist\WongTools-Setup-*.exe | Select-Object -First 1
-          $lines += ((Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $setup.Name)
-          $lines | Out-File dist\SHA256SUMS.txt -Encoding ascii
+          set -eu
+          cargo build --release --locked
+          mkdir -p dist/linux-stage/wong-tools
+          cp target/release/wong-tools dist/linux-stage/wong-tools/
+          tar -czf dist/wong-tools-linux-x64.tar.gz -C dist/linux-stage wong-tools
+          mkdir -p dist/deb-root/DEBIAN dist/deb-root/usr/lib/wong-tools dist/deb-root/usr/share/applications
+          install -m 0755 target/release/wong-tools dist/deb-root/usr/lib/wong-tools/wong-tools
+          sed "s/__VERSION__/$APP_VERSION/" packaging/deb-control > dist/deb-root/DEBIAN/control
+          cp packaging/wong-tools.desktop dist/deb-root/usr/share/applications/
+          dpkg-deb --root-owner-group --build dist/deb-root "dist/wong-tools_${APP_VERSION}_amd64.deb"
+          (cd dist && sha256sum wong-tools-linux-x64.tar.gz "wong-tools_${APP_VERSION}_amd64.deb" > SHA256SUMS-linux.txt)
+
+      # macOS：.app 进 ZIP（ditto 保 bundle 元数据）+ 未签名 DMG（能装不能公发，
+      # 公发要 Developer ID 签名 + 公证，见 packaging 文档）。
+      - name: 打包 macOS
+        if: matrix.target == 'macos'
+        shell: bash
+        run: |
+          set -eu
+          cargo build --release --locked
+          APP=dist/WongTools.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/wong-tools "$APP/Contents/MacOS/wong-tools"
+          sed -e "s/__VERSION__/$APP_VERSION/" -e "s/__BUILD__/${{ github.run_number }}/" packaging/Info.plist > "$APP/Contents/Info.plist"
+          ditto -c -k --keepParent "$APP" dist/WongTools-macos-aarch64.zip
+          hdiutil create -volname "Wong Tools" -srcfolder "$APP" -ov -format UDZO dist/WongTools-macos-aarch64.dmg
+          (cd dist && shasum -a 256 WongTools-macos-aarch64.zip WongTools-macos-aarch64.dmg > SHA256SUMS-macos.txt)
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: wong-tools-windows
+          name: wong-tools-${{ matrix.target }}
           path: |
             dist/wong-tools-windows-x64.zip
             dist/WongTools-Setup-*.exe
-            dist/SHA256SUMS.txt
+            dist/SHA256SUMS-windows.txt
+            dist/wong-tools-linux-x64.tar.gz
+            dist/wong-tools_*_amd64.deb
+            dist/SHA256SUMS-linux.txt
+            dist/WongTools-macos-aarch64.zip
+            dist/WongTools-macos-aarch64.dmg
+            dist/SHA256SUMS-macos.txt
 
-      - name: 发布 Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  # 汇总发布：三个平台包齐了才建 Release，避免三作业并行各建各的打架。
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: |
-            dist/wong-tools-windows-x64.zip
-            dist/WongTools-Setup-*.exe
-            dist/SHA256SUMS.txt
+          name: wong-tools-windows
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: wong-tools-linux
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: wong-tools-macos
+          path: release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*

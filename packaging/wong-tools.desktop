@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Wong Tools
+Exec=/usr/lib/wong-tools/wong-tools
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,7 @@
+Package: wong-tools
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Atticus6
+Description: Wong Tools desktop toolbox

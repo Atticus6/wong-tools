@@ -10,7 +10,9 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - 打包：`packaging\build.ps1`（release 构建 + 便携 ZIP + Inno 安装包，
   版本号取 `Cargo.toml`，产物落 `dist/` 不提交；要装 Inno Setup 6，
   打包姿势见 https://gpui-kit.com/docs/packaging/)。
-  推 `v*` tag 或手动点就跑 `.github/workflows/package.yml`（出包 + 建 Release）。
+  推 `v*` tag 或手动点就跑 `.github/workflows/package.yml`（三平台矩阵：
+  win 走 `build.ps1`，linux 出 tarball + `.deb`，mac 出 `.app` ZIP + 未签名
+  DMG；sccache + rust-cache 提速，包齐后汇总建一次 Release）。
 - 查看 cargo 输出用 `... 2>&1 | Select-Object -Last 40`。绝不要用
   `Select-Object -First N`——它会中途杀掉 cargo 进程。
 - 提示找不到 `cargo`：当前终端环境变量太旧。cargo 在

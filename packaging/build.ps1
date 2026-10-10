@@ -88,9 +88,12 @@ try {
 $setup = Join-Path $root "dist\WongTools-Setup-$version.exe"
 Write-Host "安装包：$setup"
 
-# 校验和：发布时贴出去，用户下载完对一遍。
-foreach ($artifact in @($zip, $setup)) {
+# 校验和：打印一份，落盘一份（SHA256SUMS-windows.txt 跟包走，
+# 对应其他平台的 SHA256SUMS-<平台>.txt，Release 里各凭文件名认领）。
+$sumLines = foreach ($artifact in @($zip, $setup)) {
     $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLower()
     Write-Host "$artifact"
     Write-Host "  SHA256: $hash"
+    "$hash  " + (Split-Path -Leaf $artifact)
 }
+$sumLines | Out-File (Join-Path $root 'dist\SHA256SUMS-windows.txt') -Encoding ascii

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS 应用包声明：__VERSION__/__BUILD__ 由 CI 填（见 .github/workflows/package.yml），本地手填。 -->
+<!-- 包标识改了就是另一个应用（升级、设置、通知全分家），永远别动。 -->
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Wong Tools</string>
+  <key>CFBundleDisplayName</key><string>Wong Tools</string>
+  <key>CFBundleIdentifier</key><string>com.github.atticus6.wongtools</string>
+  <key>CFBundleExecutable</key><string>wong-tools</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__BUILD__</string>
+</dict></plist>
