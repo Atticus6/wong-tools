@@ -33,6 +33,14 @@ xcap = "0.9"
 # 没授权 CGWindowListCreateImage 只给纯壁纸。只要 mac 用得到。
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.23"
+# macOS Vision 文字识别（accurate 级）。必须显式给 recognitionLanguages：
+# 不给时 Vision 默认只认英文，中文会识别成乱码（实测），native-ocr 没设这
+# 个所以中文坏掉——我们自己直调 Vision 来控制语言。Windows 仍走 native-ocr。
+objc2 = "0.6.5"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-vision = "0.3.2"
 
 # gpui-kit 官方文档推荐：只优化框架依赖的 Debug 运行时性能，
 # 应用自身仍保持 Debug，详见 https://gpui-kit.com/docs/installation

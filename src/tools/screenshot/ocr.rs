@@ -1,7 +1,8 @@
 //! 截图 OCR：把选区里的文字认出来，可复制。
 //!
-//! 引擎走系统原生（`native-ocr`：macOS Vision，Windows WinRT OCR），中英文
-//! 跟系统走，不打包模型、不调云。Linux 暂无引擎，`is_available` 为 false，
+//! 引擎分平台：**macOS 直调 Vision**（同目录 `vision`，显式给语言表，中文
+//! 才不会乱码），**Windows 走 native-ocr 的 WinRT 引擎**（按用户语言包
+//! 自己选，无乱码问题）。Linux 暂无引擎，`is_available` 为 false，
 //! 调用方把入口藏掉即可。识别是阻塞调用（Vision 单张约 1 秒），调用方必须
 //! 扔后台线程（`background_executor().spawn`），别卡界面。
 //!
@@ -21,12 +22,19 @@ const MIN_SIDE: u32 = 1;
 
 /// 本机有没有 OCR 引擎（Windows/macOS 有，Linux 没有）。
 pub fn is_available() -> bool {
-    native_ocr::is_available()
+    cfg!(any(windows, target_os = "macos"))
 }
 
 /// 引擎接受的最大边（0 表示没引擎，调用方先看 `is_available`）。
 pub fn max_side() -> u32 {
-    native_ocr::max_image_dimension()
+    #[cfg(target_os = "macos")]
+    {
+        super::vision::MAX_SIDE
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        native_ocr::max_image_dimension()
+    }
 }
 
 /// 只缩不放：最长边压进 `limit` 内等比换算，小图原样返回。
@@ -77,7 +85,30 @@ pub fn recognize(img: &image::RgbaImage) -> Result<String, String> {
         return Err(t("app.shot_ocr_unavailable"));
     }
     let img = prepare(img);
-    let raw = native_ocr::recognize_rgba(img.as_raw(), img.width(), img.height()).map_err(|e| {
+    let raw = recognize_raw(img.as_raw(), img.width(), img.height())?;
+    let text = normalize(&raw);
+    if text.is_empty() {
+        // “没识别到文字”
+        return Err(t("app.shot_ocr_empty"));
+    }
+    Ok(text)
+}
+
+/// 平台分发：macOS 直调 Vision（语言可控，中文不乱码），Windows 走
+/// native-ocr 的 WinRT 引擎。
+///
+/// **macOS 必须自己调**：`native-ocr` 建请求时不设 `recognitionLanguages`，
+/// Vision 默认只认英文，中文会识别成乱码（实测 `截图工具设置` → `THE ATA
+/// LEM 12 7`）。Windows 侧 WinRT 按用户语言包自己选引擎，没有这个坑，
+/// 缺语言包时返回 `NoLanguage`，翻译成能照着修的提示即可。
+#[cfg(target_os = "macos")]
+fn recognize_raw(rgba: &[u8], w: u32, h: u32) -> Result<String, String> {
+    super::vision::recognize_rgba(rgba, w, h)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn recognize_raw(rgba: &[u8], w: u32, h: u32) -> Result<String, String> {
+    native_ocr::recognize_rgba(rgba, w, h).map_err(|e| {
         use native_ocr::Error::*;
         match e {
             // Windows 用户语言没有 OCR 包最常见，单独给一句能照着修的。
@@ -86,13 +117,7 @@ pub fn recognize(img: &image::RgbaImage) -> Result<String, String> {
             Failed(detail) => detail,
             InvalidImage(detail) => detail,
         }
-    })?;
-    let text = normalize(&raw);
-    if text.is_empty() {
-        // “没识别到文字”
-        return Err(t("app.shot_ocr_empty"));
-    }
-    Ok(text)
+    })
 }
 
 /// 文本进系统剪贴板（识别成功顺手调一次，结果窗里的复制按钮也走它）。
@@ -118,9 +143,48 @@ pub(crate) struct OcrWindow {
     focus: FocusHandle,
 }
 
+/// 当前打开的识别结果窗句柄：只留一扇，新的划词会顶掉旧的（见
+/// `close_current`）。存全局是为了能跨窗口关它——结果窗是独立 PopUp，
+/// 覆盖层/主窗口拿不到它的句柄。摘掉窗口后句柄会失效，用
+/// `handle.update` 的 Ok 判断还在不在（同 `tray::ensure_main`）。
+#[derive(Default)]
+pub(crate) struct OcrWindowHandle {
+    pub handle: Option<AnyWindowHandle>,
+}
+
+impl Global for OcrWindowHandle {}
+
 impl OcrWindow {
+    /// 关掉可能还开着的识别结果窗（发一次 `update` 探活，僵尸句柄跳过）。
+    /// 划词直达开覆盖层前先调这个，免得新旧结果框同时挂在屏幕上。
+    pub(crate) fn close_current(cx: &mut App) {
+        let handle = cx.global::<OcrWindowHandle>().handle;
+        if let Some(h) = handle {
+            // 只关窗，不碰焦点：成功路径（`open`）也会调它，那里紧接着要
+            // 开新的结果窗，抢焦点会把新窗压到后台。焦点归还由“开始划词”
+            // 那侧（`close_before_select`）负责。
+            let _ = h.update(cx, |_, window, _| window.remove_window());
+            cx.global_mut::<OcrWindowHandle>().handle = None;
+        }
+    }
+
+    /// 关掉还开着的识别结果窗，并把前台还给主窗口（划词直达起手式）。
+    /// 关 PopUp 后 macOS 可能把 app 降后台，全局热键就唤不起下一次划词，
+    /// 所以收窗必须配一次 `restore_focus`。
+    pub(crate) fn close_before_select(cx: &mut App) {
+        let had = cx.global::<OcrWindowHandle>().handle.is_some();
+        Self::close_current(cx);
+        // 句柄是僵尸（窗口早没了但没走过 close）时也补一次激活：用户可能
+        // 是用别的途径关掉结果框的，app 同样可能处于后台。
+        if had || cx.global::<crate::tray::MainWindow>().handle.is_some() {
+            restore_focus(cx);
+        }
+    }
+
     /// 打开结果窗。`text` 是规整过的非空文本，调用方保证。
     pub(crate) fn open(text: String, cx: &mut App) -> Result<(), String> {
+        // 同一时刻只留一扇：旧的先关（用户连着划两次词时不会堆框）。
+        Self::close_current(cx);
         // 480x360：窄栏文章够读，又不至于盖住选区原文。
         const WIN_W: f32 = 480.0;
         const WIN_H: f32 = 360.0;
@@ -148,11 +212,11 @@ impl OcrWindow {
             is_resizable: false,
             ..WindowOptions::default()
         };
-        open_window(options, cx, |window, cx| {
-            cx.new(|cx| Self::new(text, window, cx))
-        })
-        .map(|_| ())
-        .map_err(|e| format!("打不开识别结果窗口: {e}"))
+        let (handle, _entity) =
+            open_window(options, cx, |window, cx| cx.new(|cx| Self::new(text, window, cx)))
+                .map_err(|e| format!("打不开识别结果窗口: {e}"))?;
+        cx.global_mut::<OcrWindowHandle>().handle = Some(handle);
+        Ok(())
     }
 
     fn new(text: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -174,9 +238,23 @@ impl OcrWindow {
         }
     }
 
-    fn close(&mut self, window: &mut Window) {
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.remove_window();
+        // 关掉这扇 PopUp 后要把焦点还给主窗口 + 应用，否则全局快捷键
+        // 再按唤不起 OCR（菜单栏点掉最后一个窗口，macOS 会把 app 降成
+        // 后台，Carbon 热键的 activate 拿不到 key window）。
+        cx.global_mut::<OcrWindowHandle>().handle = None;
+        restore_focus(cx);
     }
+}
+
+/// 关结果窗后把前台还给主窗口：平台级 `activate_window`（能顺带还原
+/// 最小化的主窗）+ 应用级 `activate` 兜底。跟聚光 `run_and_close` 同一套。
+fn restore_focus(cx: &mut App) {
+    if let Some(h) = cx.global::<crate::tray::MainWindow>().handle {
+        let _ = h.update(cx, |_, window, _| window.activate_window());
+    }
+    cx.activate(true);
 }
 
 impl Render for OcrWindow {
@@ -276,7 +354,7 @@ impl Render for OcrWindow {
                                     .outline()
                                     .cursor_pointer()
                                     .icon(IconName::X)
-                                    .on_click(cx.listener(|this, _, window, _| this.close(window))),
+                                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
                             ),
                     ),
             )

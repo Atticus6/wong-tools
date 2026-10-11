@@ -11,6 +11,10 @@ pub mod pin;
 pub mod select;
 pub mod view;
 
+// macOS Vision 直调（语言可控，中文不乱码）；只 macOS 编译，其它平台无此模块。
+#[cfg(target_os = "macos")]
+pub mod vision;
+
 // 外壳持有截图状态，走工具根路径拿，不直接钻 view。
 pub(crate) use view::ShotState;
 

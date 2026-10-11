@@ -101,6 +101,18 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   （GDI），arboard 写剪贴板图片，image 编 PNG / 缩略图 / 落盘。预览经
   `img(ImageSource::Image(...))` 显示，id 每次截取必须换新。
   `view.rs` 是捕获页（预览 + 复制 / 保存 / 重截）。
+- `src/tools/screenshot/ocr.rs` + `vision.rs`——截图 OCR（划词）。**macOS
+  必须直调 Vision，不能用 `native-ocr`**：那个 crate 建 `VNRecognizeTextRequest`
+  时**没设 `recognitionLanguages`**，Vision 于是只用默认（英文）模型，
+  中文全变乱码或整行丢掉（实测 `截图工具设置` → `THE ATA LEM 12 7`）。
+  `vision.rs` 显式给语言表（`zh-Hans/zh-Hant/yue-*/ja/ko` 在前、当前
+  locale 顶到最前、`en-US` 兜底），并跟 `supportedRecognitionLanguages`
+  取交集——设了系统没装的语言会让整个请求报错，取交集才能安全降级。
+  Windows 仍走 `native-ocr`（WinRT 按用户语言包自己选引擎，没这个坑，
+  缺包时回 `NoLanguage` 翻译成提示）。Linux 无引擎，`is_available` 为
+  false，入口全藏。识别阻塞（Vision 单张约 1 秒），调用方必须扔后台
+  线程。回归夹具在 `assets/tests/ocr_zh.png`（中文 UI 图），端到端测
+  “认出的文本含汉字”，改语言表前先看这个测试。
 - `src/tools/screenshot/overlay.rs`——区域选择覆盖层（全屏 PopUp +
   冻结帧 + 底部工具条）：根 `relative()`，冻结帧 flow 铺满，变暗 +
   描边走 canvas `paint_quad`（不经过布局），`canvas` 在 paint 里挂

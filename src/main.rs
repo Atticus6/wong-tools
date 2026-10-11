@@ -327,6 +327,9 @@ fn main() {
         // （无托盘的 Linux 环境关了就得重起进程，tray 建不出来会记日志）。
         // 主窗句柄记全局：关窗钩子按 WindowId 清掉，托盘唤起时重开。
         cx.set_global(tray::MainWindow::default());
+        // 识别结果窗句柄：划词直达开覆盖层前先关上一扇（跨窗口，只能存
+        // 全局；同 MainWindow 用 on_window_closed 清僵尸的思路）。
+        cx.set_global(tools::screenshot::ocr::OcrWindowHandle::default());
         cx.on_window_closed(|cx, closed| {
             let main_id = cx
                 .global::<tray::MainWindow>()

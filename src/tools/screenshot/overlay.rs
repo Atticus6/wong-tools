@@ -98,6 +98,9 @@ pub struct SelectOverlay {
     ocr_armed: bool,
     /// OCR 在途：按钮置灰防重入，识别是阻塞调用，后台线程跑。
     ocr_busy: bool,
+    /// OCR 直达且正在识别：这一段只显示“识别中…”，不摆工具条
+    /// （划词要的是松手直接出结果框，中间摆一排按钮是噪音）。
+    ocr_armed_busy: bool,
     /// OCR 失败原因：工具条下方红字展示，成功/重选即清。
     ocr_error: Option<String>,
 }
@@ -124,6 +127,10 @@ impl SelectOverlay {
         cx: &mut App,
     ) -> Result<(), String> {
         let t0 = std::time::Instant::now();
+        // 划词/截图开始新一次选区时，把还开着的识别结果窗关掉：结果框是
+        // 独立 PopUp，不主动收会和新覆盖层/新结果框叠在屏幕上（同一时刻
+        // 只留一扇，`OcrWindow::open` 也会兜底关一次）。
+        super::ocr::OcrWindow::close_before_select(cx);
         // 先冻结再开窗：用户看到的第一帧就是截到的那张，不闪。
         // 冻结帧走 RenderImage 直显，不经过 PNG 编解码（debug 下全分辨率
         // PNG 编码要几秒，这就是之前覆盖层“过很久才出现”的原因）。
@@ -236,6 +243,7 @@ impl SelectOverlay {
             text_sub: None,
             ocr_armed,
             ocr_busy: false,
+            ocr_armed_busy: false,
             ocr_error: None,
         }
     }
@@ -587,9 +595,12 @@ impl SelectOverlay {
             return;
         }
         if self.ocr_busy || !super::ocr::is_available() {
+            self.ocr_armed_busy = false;
             return;
         }
         let Some(raw) = self.cropped_raw() else {
+            // 选区太小没裁出图：识别不会跑，藏工具条没意义，放回去。
+            self.ocr_armed_busy = false;
             return;
         };
         self.ocr_busy = true;
@@ -630,8 +641,11 @@ impl SelectOverlay {
                             .update(cx, |_, window, _| window.remove_window());
                     }
                     Err(e) => {
+                        // 失败留在覆盖层：清“识别中”态并把工具条放回来，
+                        // 用户能改选区或点工具条重试。
                         let _ = this.update(cx, |view, cx| {
                             view.ocr_busy = false;
+                            view.ocr_armed_busy = false;
                             view.ocr_error = Some(e);
                             cx.notify();
                         });
@@ -728,7 +742,11 @@ impl Render for SelectOverlay {
         // 工具条跟选区走；没选区不用摆出来，拖拽中也不闪，
         // 只在松手定稿后显示。
         let (bx, by, bw, bh) = self.toolbar_rect();
-        let show_toolbar = !self.dragging && sel.is_some();
+        // OCR 直达且正在识别时：只留“识别中…”提示，不摆工具条——划词
+        // 流程要的是松手直接出结果框，中间这一秒摆一排复制/保存/标注按钮
+        // 是噪音（普通截图进来 ocr_busy 永远 false，行为不变）。
+        let ocr_direct_busy = self.ocr_armed_busy;
+        let show_toolbar = !self.dragging && sel.is_some() && !ocr_direct_busy;
         // 第二排跟第一排走；工具激活或输入中才摆出来。
         let (ox, oy, ow, oh) = super::select::options_rect(
             (bx, by, bw, bh),
@@ -996,6 +1014,18 @@ impl Render for SelectOverlay {
                         t("app.shot_cancel"),
                         cx.listener(|this, _, window, cx| this.cancel(window, cx)),
                     ))
+            }))
+            // OCR 直达识别中：工具条已藏，居中给一句“识别中…”，这一秒有交代。
+            .children(ocr_direct_busy.then(|| {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(15.))
+                    .text_color(white().opacity(0.85))
+                    .child(t("app.shot_ocr_busy"))
+                    .into_any_element()
             }))
             // OCR 失败行：工具条下方红字，选区/重试都在，不挡框选。
             .children((show_toolbar && self.ocr_error.is_some()).then(|| {
@@ -1542,6 +1572,10 @@ fn pointer_sink(input: WeakEntity<SelectOverlay>) -> impl IntoElement {
                         if this.ocr_armed {
                             this.ocr_armed = false;
                             if this.ann.tool().is_none() {
+                                // 划词流程：识别这一段藏工具条，只给
+                                // “识别中…”（start_ocr 成功就关窗，失败要
+                                // 回到可重试的覆盖层，所以起跑才置位）。
+                                this.ocr_armed_busy = true;
                                 this.start_ocr(window, cx);
                             }
                         }
