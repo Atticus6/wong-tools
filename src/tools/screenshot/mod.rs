@@ -22,6 +22,21 @@ pub const PREVIEW_MAX_H: u32 = 400;
 
 /// 截主显示器全屏，返回 RGBA 像素。
 pub fn capture_primary() -> Result<image::RgbaImage, String> {
+    // macOS 先验屏幕录制权限：没授权时底下拿到的只是纯壁纸（其他窗口全缺），
+    // 而 xcap 自己从不弹授权框。`request` 在未决定时弹系统框，已拒绝时直接
+    // 返回 false，随后给去系统设置的指引（未签名包从 /Applications 启动，
+    // 别在 DMG 里直接跑，否则授权落不下）。
+    #[cfg(target_os = "macos")]
+    {
+        let access = core_graphics::access::ScreenCaptureAccess::default();
+        if !access.preflight() {
+            access.request();
+            if !access.preflight() {
+                return Err("没有屏幕录制权限，截到的只是壁纸：系统设置 → 隐私与安全性 → 屏幕录制 → 勾选 WongTools（从 /Applications 里启动），允许后重试"
+                    .into());
+            }
+        }
+    }
     primary_monitor()?
         .capture_image()
         .map_err(|e| format!("截图失败: {e}"))

@@ -23,8 +23,15 @@ smallvec = "1"
 tokio = { version = "1", features = ["rt"] }
 toml_edit = "0.22"
 tungstenite = { version = "0.24", features = ["native-tls"] }
+muda = "0.21"
+tray-icon = "0.26"
 ureq = { version = "2.10", features = ["json"] }
 xcap = "0.9"
+
+# macOS 屏幕录制授权（CGRequestScreenCaptureAccess）：xcap 自己不弹框，
+# 没授权 CGWindowListCreateImage 只给纯壁纸。只要 mac 用得到。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.23"
 
 # gpui-kit 官方文档推荐：只优化框架依赖的 Debug 运行时性能，
 # 应用自身仍保持 Debug，详见 https://gpui-kit.com/docs/installation

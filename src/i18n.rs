@@ -242,6 +242,8 @@ mod tests {
         "app.shot_text_hint",
         "app.shot_color",
         "app.shot_draw_hint",
+        "app.tray_show",
+        "app.tray_quit",
         "app.spotlight_hint",
         "app.spotlight_empty",
         "app.spotlight_footer",

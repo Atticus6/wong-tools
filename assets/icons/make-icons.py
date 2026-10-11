@@ -24,6 +24,14 @@ W_WIDTH = 155.0
 # 成品只占画布 80% 居中：满幅 tile 在 Dock 里比邻居大一圈，
 # 留透明边和其他图标视觉一致（Terminal 同款做法）。
 ART_SCALE = 0.8
+# 托盘模板图标（macOS 菜单栏单色惯例）：44px 透明底 + 白 W，
+# 系统按深浅自动反色；Win/Linux 继续用彩色 32px。
+TRAY_SIZE = 44
+TRAY_INK = (255, 255, 255, 255)
+# W 只占一半高度，和邻居字形齐平（之前 7 太满）。
+TRAY_INSET = 12.0
+# 模板描边加粗系数：小尺寸下细线条糊，邻居都是粗线。
+TRAY_BOLD = 1.6
 
 
 def sd_round_box(x, y):
@@ -254,6 +262,35 @@ def compose_master(full):
     return bytes(out)
 
 
+def render_tray_template():
+    """托盘模板图：W 主包络缩进 TRAY_SIZE，描边同比例，白墨透明底。"""
+    xs = [p[0] for p in W_PTS]
+    ys = [p[1] for p in W_PTS]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    s = (TRAY_SIZE - TRAY_INSET * 2) / span
+    tx = TRAY_INSET - min(xs) * s
+    ty = TRAY_INSET - min(ys) * s
+    hw = W_WIDTH * s / 2.0 * TRAY_BOLD
+    pts = [(x * s + tx, y * s + ty) for (x, y) in W_PTS]
+    out = bytearray(TRAY_SIZE * TRAY_SIZE * 4)
+    for py in range(TRAY_SIZE):
+        base = py * TRAY_SIZE * 4
+        for px in range(TRAY_SIZE):
+            best = float("inf")
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                dx, dy = bx - ax, by - ay
+                l2 = dx * dx + dy * dy
+                t = 0.0 if l2 < 1e-9 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+                ddx, ddy = px - (ax + dx * t), py - (ay + dy * t)
+                d = (ddx * ddx + ddy * ddy) ** 0.5
+                if d < best:
+                    best = d
+            a = min(1.0, max(0.0, (hw + 0.5 - best)))
+            o = base + px * 4
+            out[o : o + 4] = bytes((255, 255, 255, int(a * 255 + 0.5)))
+    return bytes(out)
+
+
 def main():
     print("画主图 1024（纯 Python 解析式，约 1~2 分钟）…", flush=True)
     master = compose_master(render_master())
@@ -268,6 +305,9 @@ def main():
     print("wong-tools.icns ok")
     write_ico(os.path.join(HERE, "wong-tools.ico"), master)
     print("wong-tools.ico ok")
+    tray = render_tray_template()
+    write_png(os.path.join(HERE, "tray-template.png"), TRAY_SIZE, TRAY_SIZE, tray)
+    print("tray-template.png ok")
     print("全套落盘，直接提交即可（CI 只拷贝）。")
 
 

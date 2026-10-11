@@ -423,6 +423,12 @@ app:
   shot_draw_hint:
     en: Drag inside the selection to draw
     zh-CN: 在选区内拖拽绘制
+  tray_show:
+    en: Show main window
+    zh-CN: 显示主窗口
+  tray_quit:
+    en: Quit
+    zh-CN: 退出
   spotlight_hint:
     en: Search tools, commands, settings…
     zh-CN: 搜索工具、命令、设置…

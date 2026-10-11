@@ -16,6 +16,7 @@ mod spotlight;
 mod telemetry;
 mod theme;
 mod tools;
+mod tray;
 mod updater;
 
 use std::borrow::Cow;
@@ -231,6 +232,23 @@ fn cleanup_owned_coffee() {
     }
 }
 
+/// 开主窗：启动和托盘唤起共用。落位按存档；关闭按钮先落盘位置再放行
+/// （窗销毁后就读不到矩形了）。`AnyWindowHandle` 是 Copy，随便传。
+pub(crate) fn open_main_window(cx: &mut App) -> Result<AnyWindowHandle, String> {
+    let (handle, _) = open_window(window_options(cx), cx, |window, cx| {
+        cx.new(|cx| shell::WsShell::new(window, cx))
+    })
+    .map_err(|e| format!("打不开主窗口: {e}"))?;
+    // future 要求 'static 不能借 `cx`：读窗和写库都在闭包同步段做完。
+    let _ = handle.update(cx, |_, window, cx| {
+        window.on_window_should_close(&*cx, |window, _| {
+            persist_window_bounds(window);
+            true
+        });
+    });
+    Ok(handle)
+}
+
 fn main() {
     // 崩溃上报先行：panic hook 是进程级的，放第一行，后面哪崩都抓得到。
     // 初始化失败只记日志，应用照常启动。
@@ -299,12 +317,14 @@ fn main() {
             cx.bind_keys(bindings);
         }
 
-        // 关窗策略：所有窗口都没了才退出（官方多窗口做法，
-        // https://gpui-kit.com/docs/multi-window/ ）。
-        // 面板窗和主窗谁先关都不影响另一个，全关了才退。
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
+        // 常驻：关光所有窗也不退，托盘图标 + 菜单里留着
+        // （无托盘的 Linux 环境关了就得重起进程，tray 建不出来会记日志）。
+        // 主窗句柄记全局：关窗钩子按 WindowId 清掉，托盘唤起时重开。
+        cx.set_global(tray::MainWindow(None));
+        cx.on_window_closed(|cx, closed| {
+            let main_id = cx.global::<tray::MainWindow>().0.map(|h| h.window_id());
+            if Some(closed) == main_id {
+                cx.global_mut::<tray::MainWindow>().0 = None;
             }
         })
         .detach();
@@ -313,33 +333,29 @@ fn main() {
         // 钩子兜底。detach 让钩子活到进程结束，不然闭包结束就注销了。
         // 存两处：`on_window_should_close` 管右上角关闭（窗还在，能读到矩形；
         // `on_window_closed` 回调时窗已经没了，读不到）；`on_app_quit` 管
-        // 窗还活着的退出（菜单/快捷键/`quit()`）。两处都写，关几次存几次，
+        // 窗还活着的退出（托盘菜单的退出/`quit()`）。两处都写，关几次存几次，
         // 幂等不怕重复。
-        open_window(window_options(cx), cx, |window, cx| {
-            cx.new(|cx| shell::WsShell::new(window, cx))
-        })
-        .map(|(main_window, _)| {
-            // 关闭按钮路径：窗还没销毁，先把位置落盘，放行关闭。
-            let _ = main_window.update(cx, |_, window, cx| {
-                window.on_window_should_close(&*cx, |window, _| {
-                    persist_window_bounds(window);
-                    true
-                });
-            });
-            // future 要求 'static 不能借 `cx`：读窗和写库都在闭包同步段做完，
-            // 只回一个空 future。
-            cx.on_app_quit(move |cx: &mut App| {
-                cleanup_owned_proxy();
-                // 窗口已经没了就跳过（`update` 返回 Err）：关闭按钮路径
-                // 已经存过，不写脏数据。
-                let _ = main_window.update(cx, |_, window, _| {
+        cx.on_app_quit(|cx: &mut App| {
+            cleanup_owned_proxy();
+            // 窗口已经没了就跳过（`update` 返回 Err）：关闭按钮路径
+            // 已经存过，不写脏数据。
+            if let Some(h) = cx.global::<tray::MainWindow>().0 {
+                let _ = h.update(cx, |_, window, _| {
                     persist_window_bounds(window);
                 });
-                async {}
-            })
-            .detach();
+            }
+            async {}
         })
-        .expect("Failed to open window");
+        .detach();
+
+        match open_main_window(cx) {
+            Ok(handle) => {
+                cx.global_mut::<tray::MainWindow>().0 = Some(handle);
+            }
+            Err(e) => eprintln!("{e}"),
+        }
+        // 托盘常驻：图标 + 菜单 + 事件泵；建不出来只记日志（见 tray）。
+        tray::init(cx);
     });
 }
 
