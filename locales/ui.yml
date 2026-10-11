@@ -381,6 +381,24 @@ app:
   shot_tool_redo:
     en: Redo
     zh-CN: 重做
+  shot_tab_history:
+    en: History
+    zh-CN: 历史
+  shot_tab_settings:
+    en: Settings
+    zh-CN: 设置
+  shot_history_title:
+    en: Captures
+    zh-CN: 历史记录
+  shot_history_empty:
+    en: No captures yet, one will be kept here
+    zh-CN: 还没有截图，截一张自动记在这里
+  shot_hotkey_title:
+    en: Screenshot hotkey
+    zh-CN: 截图快捷键
+  shot_delete:
+    en: Delete
+    zh-CN: 删除
   shot_clear:
     en: Clear all annotations
     zh-CN: 清空全部标注
@@ -426,6 +444,9 @@ app:
   tray_show:
     en: Show main window
     zh-CN: 显示主窗口
+  tray_shot:
+    en: Screenshot
+    zh-CN: 截图
   tray_quit:
     en: Quit
     zh-CN: 退出

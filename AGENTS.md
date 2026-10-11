@@ -65,11 +65,18 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   认了等于闪退）。
   全局键走 `global-hotkey`（后台也能收），应用内走官方 keybinding（`bind_keys` + Action +
   `on_action`，`None` 上下文后来居上）；两边调同一个开关，系统键会把
-  事件吃掉，不双跳。按键录制用 `capture_key_down` 读 `Keystroke` 现拼原文。
+  事件吃掉，不双跳。按键录制接键统一走 `shell` 的 `intercept_keystrokes`
+  拦截器（见下方「快捷键修改规范」），别在元素上挂 `capture_key_down`。
 - `src/shell.rs`——只剩框架：`WsShell`（字段 `pub(crate)`）、`TOOLS`、
   标题栏/侧边栏/分发、`Drop` 兜底。工具视图和设置页视图不在这。
 - `src/tray.rs`——系统托盘常驻（不是侧边栏工具）：关窗不退进程，
   点托盘菜单的退出才是真退出（走正常退出钩子：存档/清代理都跑）。
+  菜单：显示主窗口 / 截图（后缀展示全局键 `Ctrl+Alt+A`）/ 退出。
+  截图键默认 `SHOT_HOTKEY`（微信/QQ 同款），截图页设置 tab 可改，走聚光
+  同款 `HotkeyHandle` + 托盘泵轮询，对上 id 才起覆盖层，连按 1s 去抖。
+  截图借主窗 WsShell 起区域覆盖层（主窗关了就先重开；`open_window`
+  根视图包了层 `Root`，句柄 downcast 不到 WsShell，所以
+  `open_main_window` 直接回内容 entity 存全局）。
   事件走通道 + 前台定时轮询（`App::spawn` 的 future 跑在主线程，
   托盘库回调在系统线程，直接碰 `App` 会炸 RefCell，泵里只做
   `try_recv` + `cx.update` 分发）；`TrayIcon` 句柄必须存全局，
@@ -202,6 +209,37 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   （只优化框架依赖，应用自身保持可调试）。`Cargo.lock` 保持提交。
   永远不要提交 `target/`。
 
+## 快捷键修改规范（呼出键 / 截图键）
+
+两处改键（设置页呼出键、截图页设置 tab）共用下面四条，都是实测踩过的坑，
+改 gpui-kit / `global-hotkey` 版本后要复查。
+
+- **接键用 `App::intercept_keystrokes`，别用元素上的 `capture_key_down`。**
+  后者只跑在**聚焦路径**上，而录制一开，承载按钮的那行就被「按下快捷键…」
+  提示行顶掉了（截图键那边还额外 `window.blur()` 扔焦点）。按钮卸载 →
+  焦点丢失 → 路径塌回根节点 → 行级/根级监听全哑，**怎么按都录不进**。
+  拦截器在窗口级、动作解析之前跑，不看焦点。唯一入口是
+  `WsShell::new` 里那个 `hotkey_capture`（两个录制共用，按 `window_id`
+  过滤掉面板窗/覆盖层窗），录制期间 `stop_propagation` 顺带挡住
+  回车/空格把刚点的按钮再点一遍。`Subscription` 存 `WsShell` 字段，drop 即退订。
+- **`GlobalHotKeyManager` 全进程只能有一个。** macOS 走 Carbon 的
+  `InstallEventHandler`，第二个 `new()` 直接 `Err`（实测
+  `Operation not permitted`）。所以走 `spotlight::shared_manager()`
+  （静态 `OnceLock` 常驻，失败不写缓存好让下次重试），**任何地方都别再
+  自己 `GlobalHotKeyManager::new()`**。曾经就是聚光/截图各建一个，截图那个
+  永远 `None`，改键必报「系统热键不可用」。
+- **`rebind` 必须先 `unregister` 旧键。** macOS 同一组合不能重复注册
+  （`Unable to register hotkey`），不解就换不回之前用过的键，旧键还白占
+  一个全局快捷键。`HotkeyHandle` 还实现了 `Drop` 放键：主窗关掉再开
+  会新建句柄注册同一组合，旧的还挂着新句柄就注册不上。
+- **应用内绑定 `Keymap::add_bindings` 只追加、没清空 API。** 改键只
+  `bind_keys` 新键的话旧键照样呼出面板（实测两键都命中）。必须走
+  `rebind_app_keymap`：先给旧键压一条 `Unbind(ToggleSpotlight.name())`
+  再绑新键，且 `old != new` 才压（`Unbind` 匹配**后续**绑定，同键自改
+  会把刚绑的一起摘掉，键直接失灵）。改键入口：`record_hotkey`（录制）
+  和设置页「恢复默认」。全局键换绑成功但入库失败只记日志（`rebind_hotkey`），
+  不回滚。
+
 ## 卡片网格布局规范（模型 / 节点卡片）
 
 - 版式：`div().grid().grid_cols(grid.cols).gap(px(8.)).w(px(grid.width)).min_w_0()`，
@@ -260,6 +298,10 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   之前。语言切换走 `component::set_locale`（经 `i18n::set_language`）。
 - 改全局 locale 的测试必须拿 `i18n::lock_locale()` 串行，否则并行跑
   互相覆盖。
+- 快捷键改键逻辑要单测能覆盖的部分：`shared_manager` 同一性、`Keymap`
+  的 `Unbind` 前后命中数（见 `spotlight` 的两个测试）。录制交互本身
+  （点「修改」→ 按组合键）无头驱动不了，别为了测它加 `test-support`，
+  靠上面两条纯逻辑兜住回归。
 - 语言运行时可切（`set_language` + `cx.notify()` 即时重绘），窗口标题
   等窗口级文字需重启生效；主题用 `theme::apply` 即时切换并重绘所有窗口。
 - 设置持久化走 libsql 本地库（`src/settings.rs`，键值表 + 自动规则表

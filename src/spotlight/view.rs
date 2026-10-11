@@ -85,10 +85,25 @@ impl SpotlightView {
     fn start_hotkey_poll(&self, cx: &mut Context<WsShell>) {
         cx.spawn(async move |this, cx| {
             let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+            let mut ticks = 0u32;
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(120))
                     .await;
+                ticks += 1;
+                // 补注册：和托盘截图键同款，启动太早建不出管理器时隔 ~6s 重试。
+                if ticks % 50 == 0 {
+                    let _ = cx.update(|cx| {
+                        this.update(cx, |view, _| {
+                            if view.spotlight.hotkey.current_id().is_none() {
+                                let spec = crate::settings::hotkey().unwrap_or_else(|| {
+                                    super::DEFAULT_HOTKEY.to_string()
+                                });
+                                let _ = view.spotlight.hotkey.rebind(&spec);
+                            }
+                        })
+                    });
+                }
                 let mut pressed = Vec::new();
                 while let Ok(event) = receiver.try_recv() {
                     if event.state == global_hotkey::HotKeyState::Pressed {
@@ -156,6 +171,31 @@ impl SpotlightView {
         self.spec = spec.to_string();
         self.hotkey_error = None;
         Ok(keymap)
+    }
+
+    /// 改键后把应用内兜底绑定换掉：`Keymap::add_bindings` **只追加不清**，
+    /// 光 `bind_keys` 新键的话旧键还留在表里，按旧键照样呼出面板
+    /// （实测两个键都能命中）。所以先给旧键压一条 `Unbind`，再绑新键。
+    ///
+    /// `Unbind` 按“键位 + 动作名”匹配后续绑定，追加顺序即优先级：
+    /// 我们把 Unbind 排在绑新键之前，旧键被摘、新键生效。
+    pub fn rebind_app_keymap(&self, old_keymap: &str, cx: &mut App) {
+        let new_keymap = match super::keymap_binding_string(&self.spec) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("应用内绑定跳过（快捷键非法）: {e}");
+                return;
+            }
+        };
+        // 旧键和新区键写法相同就别 Unbind 了（否则会把刚绑的也摘掉）。
+        if old_keymap != new_keymap {
+            cx.bind_keys([KeyBinding::new(
+                old_keymap,
+                Unbind(ToggleSpotlight.name().into()),
+                None,
+            )]);
+        }
+        cx.bind_keys([KeyBinding::new(&new_keymap, ToggleSpotlight, None)]);
     }
 }
 
@@ -518,8 +558,8 @@ impl WsShell {
         cx.notify();
     }
 
-    /// 设置页录制按键：调用方只在录制态调（`recording` 为 true 时挂
-    /// `capture_key_down`，平时不监听）。Esc 退出，其他组合走校验入库。
+    /// 设置页录制按键：调用方是 `shell` 的按键拦截器（只在 `recording`
+    /// 为 true 时调，不受焦点影响）。Esc 退出，其他组合走校验入库。
     pub(crate) fn record_hotkey(&mut self, stroke: &gpui_kit::Keystroke, cx: &mut Context<Self>) {
         match format_recorded(stroke) {
             // Esc：退出录制，保持原快捷键。
@@ -530,18 +570,23 @@ impl WsShell {
             // 纯修饰键/裸键：继续等。
             Recorded::Ignore => {}
             // 有效组合：校验 + 重绑 + 入库，失败展示原因并保持录制。
-            Recorded::Spec(spec) => match self.spotlight.rebind_hotkey(&spec) {
-                Ok(keymap) => {
-                    // 应用内兜底绑定追加：同深度后来居上，老绑定自然降级。
-                    cx.bind_keys([KeyBinding::new(&keymap, ToggleSpotlight, None)]);
-                    self.spotlight.recording = false;
-                    cx.notify();
+            Recorded::Spec(spec) => {
+                // 旧的应用内绑定写法，交给 `rebind_app_keymap` 摘掉。
+                let old_keymap = super::keymap_binding_string(&self.spotlight.spec).unwrap_or_default();
+                match self.spotlight.rebind_hotkey(&spec) {
+                    Ok(_) => {
+                        // 应用内兜底绑定：Unbind 旧键 + 绑新键（只追加不清，
+                        // 不摘旧键的话旧键还能呼出面板）。
+                        self.spotlight.rebind_app_keymap(&old_keymap, cx);
+                        self.spotlight.recording = false;
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        self.spotlight.hotkey_error = Some(e);
+                        cx.notify();
+                    }
                 }
-                Err(e) => {
-                    self.spotlight.hotkey_error = Some(e);
-                    cx.notify();
-                }
-            },
+            }
         }
     }
 }
@@ -553,10 +598,56 @@ mod tests {
     use super::PANEL_H;
     use super::PANEL_W;
     use super::palette_origin;
+    use crate::spotlight::ToggleSpotlight;
+    use gpui_kit::Action;
     use gpui_kit::Bounds;
+    use gpui_kit::KeyBinding;
+    use gpui_kit::Keymap;
+    use gpui_kit::Keystroke;
+    use gpui_kit::Unbind;
     use gpui_kit::point;
     use gpui_kit::px;
     use gpui_kit::size;
+
+    #[test]
+    fn rebinding_app_keymap_retires_the_old_keystroke() {
+        // `Keymap::add_bindings` 只追加不清：改键时只绑新键的话，旧键还留在
+        // 表里，按旧键照样呼出面板（用户以为改掉了，其实没改）。这里锁住
+        // “Unbind 旧键 + 绑新键”这条顺序：旧键必须归零。
+        let mut keymap = Keymap::default();
+        keymap.add_bindings([KeyBinding::new("alt-space", ToggleSpotlight, None)]);
+        // 改键：先 Unbind 旧键，再绑新键（与 `rebind_app_keymap` 同序）。
+        keymap.add_bindings([KeyBinding::new(
+            "alt-space",
+            Unbind(ToggleSpotlight.name().into()),
+            None,
+        )]);
+        keymap.add_bindings([KeyBinding::new("ctrl-shift-k", ToggleSpotlight, None)]);
+
+        let matched = |input: &str| {
+            let ks = Keystroke::parse(input).expect("合法按键");
+            keymap.bindings_for_input(&[ks], &[]).0.len()
+        };
+        assert_eq!(matched("alt-space"), 0, "旧键必须被摘掉，否则改键等于没改");
+        assert_eq!(matched("ctrl-shift-k"), 1, "新键必须能命中");
+    }
+
+    #[test]
+    fn rebinding_to_same_keystroke_must_not_unbind_itself() {
+        // 同一个键“改”成自己时不能压 Unbind——Unbind 按“键位 + 动作名”
+        // 匹配**后续**绑定，排在后面会把刚绑的也摘掉，键就彻底失灵。
+        // `rebind_app_keymap` 靠 old != new 挡这个。这里锁住该前提：
+        // 不加 Unbind 时重复绑定不会让键消失（只是命中数变多）。
+        let mut keymap = Keymap::default();
+        keymap.add_bindings([KeyBinding::new("alt-space", ToggleSpotlight, None)]);
+        keymap.add_bindings([KeyBinding::new("alt-space", ToggleSpotlight, None)]);
+
+        let ks = Keystroke::parse("alt-space").expect("合法按键");
+        assert!(
+            !keymap.bindings_for_input(&[ks], &[]).0.is_empty(),
+            "不加 Unbind 时键必须仍然命中"
+        );
+    }
 
     #[test]
     fn palette_lands_top_center_of_screen() {

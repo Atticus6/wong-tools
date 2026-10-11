@@ -48,6 +48,10 @@ const KEY_SELECTED_TOOL: &str = "selected_tool";
 const KEY_SIDEBAR_COLLAPSED: &str = "sidebar_collapsed";
 /// 呼出搜索条的全局快捷键（`"Alt+Space"` 这种写法，见 `spotlight`）。
 const KEY_HOTKEY: &str = "hotkey";
+/// 截图全局快捷键（同上写法，见 `tray::SHOT_HOTKEY` 默认）。
+const KEY_SHOT_HOTKEY: &str = "shot_hotkey";
+/// 截图历史记录（`ShotRecord` 数组 JSON，见 screenshot/history）。
+const KEY_SHOT_HISTORY: &str = "shot_history";
 /// AI 转发网关端口（字符串存，非法回落默认）。
 const KEY_AIRELAY_PORT: &str = "airelay_port";
 /// AI 转发强制模型（空串 = 跟随客户端）。
@@ -651,6 +655,45 @@ pub fn set_hotkey(spec: &str) -> Result<(), String> {
     block_on(async {
         let conn = open(&db_path()).await?;
         set(&conn, KEY_HOTKEY, spec).await
+    })
+}
+
+/// 读截图全局快捷键原文；没存过或库坏了返回 `None`，
+/// 调用方回落默认（`tray::SHOT_HOTKEY`）。
+pub fn shot_hotkey() -> Option<String> {
+    block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_SHOT_HOTKEY).await.ok()?
+    })
+}
+
+/// 存截图快捷键原文。调用方先过 `spotlight` 的解析，非法不进库。
+pub fn set_shot_hotkey(spec: &str) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_SHOT_HOTKEY, spec).await
+    })
+}
+
+/// 读截图历史（坏了/没有回空表，不崩）。
+pub fn shot_history() -> Vec<crate::tools::screenshot::history::ShotRecord> {
+    let raw: Option<String> = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_SHOT_HISTORY).await.ok()?
+    });
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 存截图历史（调用方已截断到上限）。
+pub fn set_shot_history(
+    list: &[crate::tools::screenshot::history::ShotRecord],
+) -> Result<(), String> {
+    let json =
+        serde_json::to_string(list).map_err(|e| format!("历史序列化失败: {e}"))?;
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_SHOT_HISTORY, &json).await
     })
 }
 

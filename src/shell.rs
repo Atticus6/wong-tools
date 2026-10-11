@@ -213,6 +213,8 @@ pub struct WsShell {
     pub(crate) theme_combo: Entity<ComboboxState<SearchableVec<String>>>,
     /// 下拉事件订阅：Subscription drop 即退订，必须活着。
     combo_subs: Vec<Subscription>,
+    /// 快捷键录制（呼出键/截图键）的按键拦截：见 `new` 里的说明，drop 即退订。
+    hotkey_capture: Subscription,
     pub(crate) settings_theme: String,
     /// 主窗口句柄：搜索面板执行完把主窗拉回前台用（最小化也要还原）。
     /// 构造期只记 id，不读窗口几何（那时 `bounds()` 不可靠，句柄不受影响）。
@@ -251,6 +253,8 @@ impl WsShell {
         let theme_combo = cx.new(|cx| {
             ComboboxState::new(SearchableVec::new(theme_names), theme_selected, window, cx)
         });
+        // 录制拦截器要按窗口 id 过滤（面板窗的按键不算），构造期取一次就够。
+        let main_window_id = window.window_handle().window_id();
         let mut this = Self {
             // 上次选中的工具：序号越界（工具增删）回落欢迎页。
             selected: crate::settings::selected_tool()
@@ -272,7 +276,40 @@ impl WsShell {
             theme_combo,
             // 订阅先空着，下面建完再填。
             combo_subs: Vec::new(),
+            // 同上，录制拦截的订阅在下面建。
+            hotkey_capture: Subscription::new(|| {}),
         };
+        // 快捷键录制（呼出键 + 截图键共用一个拦截器）：走
+        // `App::intercept_keystrokes`（窗口级、在动作解析之前）。
+        //
+        // **不能**用元素上的 `capture_key_down`：那个只跑在聚焦路径上，
+        // 而录制一开，承载按钮的那一行就被“按下快捷键…”的提示行顶掉了
+        // （截图键那边还额外 `window.blur()` 扔焦点）。按钮卸载 → 焦点丢失
+        // → 聚焦路径塌回根节点 → 行级/根级监听都收不到按键，录制成了死键。
+        // 拦截器不看焦点，两个录制都稳；录制期间 `stop_propagation` 顺带
+        // 挡住回车/空格把刚点的按钮再点一遍。
+        let weak = cx.entity().downgrade();
+        this.hotkey_capture = cx.intercept_keystrokes(move |event, window, cx| {
+            // 面板窗/覆盖层窗的按键不认：录制只在主窗发起。
+            if window.window_handle().window_id() != main_window_id {
+                return;
+            }
+            let (shot, palette) = weak
+                .read_with(cx, |this, _| (this.shot.recording, this.spotlight.recording))
+                .unwrap_or((false, false));
+            if !shot && !palette {
+                return;
+            }
+            cx.stop_propagation();
+            let stroke = event.keystroke.clone();
+            let _ = weak.update(cx, |this, cx| {
+                if shot {
+                    this.record_shot_hotkey(&stroke, cx);
+                } else {
+                    this.record_hotkey(&stroke, cx);
+                }
+            });
+        });
         // 下拉事件：Change 在每次点选后触发（单选随后还有 Confirm，值一样，
         // 只认 Change）。选中即应用 + 重绘，实体自己的选中态不用再动。
         let lang_sub = cx.subscribe(
@@ -375,6 +412,7 @@ impl WsShell {
     pub(crate) fn select_tool(&mut self, ix: usize) {
         self.selected = ix;
         self.spotlight.recording = false;
+        self.shot.recording = false;
         if let Err(e) = crate::settings::set_selected_tool(ix) {
             eprintln!("存选中工具失败: {e}");
         }
@@ -693,7 +731,9 @@ impl WsShell {
         sidebar_w: f32,
     ) -> impl IntoElement {
         match tool.id {
-            ToolId::Screenshot => self.render_shot(cx).into_any_element(),
+            ToolId::Screenshot => self
+                .render_shot(window, cx, sidebar_w)
+                .into_any_element(),
             ToolId::Proxy => self.render_proxy(window, cx, sidebar_w).into_any_element(),
             ToolId::AiRelay => self.render_airelay(window, cx, sidebar_w).into_any_element(),
             ToolId::Coffee => self.render_coffee(cx).into_any_element(),

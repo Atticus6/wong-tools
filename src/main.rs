@@ -233,9 +233,13 @@ fn cleanup_owned_coffee() {
 }
 
 /// 开主窗：启动和托盘唤起共用。落位按存档；关闭按钮先落盘位置再放行
-/// （窗销毁后就读不到矩形了）。`AnyWindowHandle` 是 Copy，随便传。
-pub(crate) fn open_main_window(cx: &mut App) -> Result<AnyWindowHandle, String> {
-    let (handle, _) = open_window(window_options(cx), cx, |window, cx| {
+/// （窗销毁后就读不到矩形了）。返回窗口句柄 + 内容 entity（托盘调
+/// WsShell 方法用；`open_window` 根视图包了层 `Root`，句柄 downcast
+/// 不到 WsShell，别试）。
+pub(crate) fn open_main_window(
+    cx: &mut App,
+) -> Result<(AnyWindowHandle, Entity<crate::shell::WsShell>), String> {
+    let (handle, shell) = open_window(window_options(cx), cx, |window, cx| {
         cx.new(|cx| shell::WsShell::new(window, cx))
     })
     .map_err(|e| format!("打不开主窗口: {e}"))?;
@@ -246,7 +250,7 @@ pub(crate) fn open_main_window(cx: &mut App) -> Result<AnyWindowHandle, String> 
             true
         });
     });
-    Ok(handle)
+    Ok((handle, shell))
 }
 
 fn main() {
@@ -320,11 +324,14 @@ fn main() {
         // 常驻：关光所有窗也不退，托盘图标 + 菜单里留着
         // （无托盘的 Linux 环境关了就得重起进程，tray 建不出来会记日志）。
         // 主窗句柄记全局：关窗钩子按 WindowId 清掉，托盘唤起时重开。
-        cx.set_global(tray::MainWindow(None));
+        cx.set_global(tray::MainWindow::default());
         cx.on_window_closed(|cx, closed| {
-            let main_id = cx.global::<tray::MainWindow>().0.map(|h| h.window_id());
+            let main_id = cx
+                .global::<tray::MainWindow>()
+                .handle
+                .map(|h| h.window_id());
             if Some(closed) == main_id {
-                cx.global_mut::<tray::MainWindow>().0 = None;
+                *cx.global_mut::<tray::MainWindow>() = tray::MainWindow::default();
             }
         })
         .detach();
@@ -339,7 +346,7 @@ fn main() {
             cleanup_owned_proxy();
             // 窗口已经没了就跳过（`update` 返回 Err）：关闭按钮路径
             // 已经存过，不写脏数据。
-            if let Some(h) = cx.global::<tray::MainWindow>().0 {
+            if let Some(h) = cx.global::<tray::MainWindow>().handle {
                 let _ = h.update(cx, |_, window, _| {
                     persist_window_bounds(window);
                 });
@@ -349,8 +356,11 @@ fn main() {
         .detach();
 
         match open_main_window(cx) {
-            Ok(handle) => {
-                cx.global_mut::<tray::MainWindow>().0 = Some(handle);
+            Ok((handle, shell)) => {
+                *cx.global_mut::<tray::MainWindow>() = tray::MainWindow {
+                    handle: Some(handle),
+                    shell: Some(shell),
+                };
             }
             Err(e) => eprintln!("{e}"),
         }

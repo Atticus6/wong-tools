@@ -49,7 +49,8 @@ impl WsShell {
 
     /// 设置页的一组：描边卡片 + 组名 + 若干行。
     /// 文案走 `SharedString`：借来的 `&str` 在元素树里活不够长。
-    fn settings_section(
+    /// 截图工具的设置 tab 共用同一套版式（`pub(crate)` 特意开的口）。
+    pub(crate) fn settings_section(
         &self,
         title: impl Into<SharedString>,
         rows: Vec<AnyElement>,
@@ -73,7 +74,8 @@ impl WsShell {
 
     /// 组里的一行：左标题 + 说明，右控件。
     /// 文案走 `SharedString`：借来的 `&str` 在元素树里活不够长。
-    fn setting_row(
+    /// 同上，截图设置 tab 共用。
+    pub(crate) fn setting_row(
         title: impl Into<SharedString>,
         desc: impl Into<SharedString>,
         control: AnyElement,
@@ -125,29 +127,24 @@ impl WsShell {
     }
 
     /// “快捷键”分组：当前组合 + 修改/恢复默认，失败原因另起一行。
-    /// 录制时整行挂 `capture_key_down`（按钮点完焦点还在行内，按键冒泡
-    /// 前先到）；切走页面录制态由 `select_tool` 顺手清掉。
+    /// 录制时整行换成提示语；按键不在这里挂 `capture_key_down`——那玩意
+    /// 只跑在聚焦路径上，而点“修改”后按钮连同承载它的那一行都被换掉了，
+    /// 焦点一丢路径就塌回根节点，怎么按都录不进。接键统一在 `shell` 的
+    /// `intercept_keystrokes`（与截图键共用一个，见 `WsShell::new`）。
+    /// 切走页面录制态由 `select_tool` 顺手清掉。
     fn hotkey_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         use gpui_kit::component::button::Button;
         use gpui_kit::component::Sizable as _;
 
         let red = cx.theme().red;
         if self.spotlight.recording {
-            // 录制态：提示语 + 按键捕获（`WeakEntity::update` 写回主窗口，
-            // overlay 同款），占整行。
-            let weak = cx.entity().downgrade();
+            // 录制态：提示语占整行，按键由全局拦截器接（见函数注释）。
             let row = div()
                 .id("hotkey-row")
                 .flex()
                 .flex_none()
                 .items_center()
                 .h(px(32.))
-                .capture_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
-                    let stroke = event.keystroke.clone();
-                    let _ = weak.update(cx, |this, cx| {
-                        this.record_hotkey(&stroke, cx);
-                    });
-                })
                 .child(
                     div()
                         .flex_1()
@@ -187,17 +184,15 @@ impl WsShell {
                         .outline()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
+                            // 旧的应用内绑定写法，换键后要 Unbind 掉。
+                            let old_keymap =
+                                crate::spotlight::keymap_binding_string(&this.spotlight.spec)
+                                    .unwrap_or_default();
                             match this
                                 .spotlight
                                 .rebind_hotkey(crate::spotlight::DEFAULT_HOTKEY)
                             {
-                                Ok(keymap) => {
-                                    cx.bind_keys([KeyBinding::new(
-                                        &keymap,
-                                        crate::spotlight::ToggleSpotlight,
-                                        None,
-                                    )]);
-                                }
+                                Ok(_) => this.spotlight.rebind_app_keymap(&old_keymap, cx),
                                 Err(e) => this.spotlight.hotkey_error = Some(e),
                             }
                             cx.notify();

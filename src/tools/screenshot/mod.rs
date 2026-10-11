@@ -4,6 +4,7 @@
 //! 多显示器只截主显示器。区域框选见同目录的 `overlay`，矩形数学见 `select`。
 
 pub mod annotate;
+pub mod history;
 pub mod overlay;
 pub mod pin;
 pub mod select;

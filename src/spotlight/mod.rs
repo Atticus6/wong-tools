@@ -6,6 +6,7 @@
 //! 解析/转换/过滤都是纯函数，单测直接覆盖；系统注册才碰 OS。
 
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use global_hotkey::GlobalHotKeyManager;
 use global_hotkey::hotkey::HotKey;
@@ -149,35 +150,56 @@ pub fn format_recorded(stroke: &gpui_kit::Keystroke) -> Recorded {
     Recorded::Spec(tokens.join("+"))
 }
 
-/// 全局热键句柄：`GlobalHotKeyManager` 要求主线程创建，
+/// 进程唯一的管理器：`GlobalHotKeyManager` 在 macOS 上走 Carbon 的
+/// `InstallEventHandler`，**全进程只能装一个**，第二个直接 `Err`
+/// （实测 `Operation not permitted`）。聚光键和截图键各建一个的话，
+/// 后建的那个永远拿到 `None`，截图键就再也绑不上了——所以共用这一个。
+///
+/// 放静态 `OnceLock` 里常驻（静态不会 drop）：管理器析构会注销自己名下
+/// 所有热键并摘掉事件处理器，某个句柄先死不该把另一个的键一起带走。
+/// 只缓存成功结果，失败不写缓存——启动太早建不出来时，下次调用还能重试。
+fn shared_manager() -> Option<&'static GlobalHotKeyManager> {
+    static MANAGER: OnceLock<GlobalHotKeyManager> = OnceLock::new();
+    if let Some(manager) = MANAGER.get() {
+        return Some(manager);
+    }
+    let created = GlobalHotKeyManager::new().ok()?;
+    // 竞态下别人可能先塞进去了，丢自己的那份用先到的（同一个注册只会有一个）。
+    let _ = MANAGER.set(created);
+    MANAGER.get()
+}
+
+/// 全局热键句柄：只记自己当前挂着哪个键，注册/解注册都走共享管理器。
 /// 跟着 `SpotlightView` 活（视图以外只读 `current_id` 配事件）。
 pub struct HotkeyHandle {
-    manager: Option<GlobalHotKeyManager>,
     current: Option<HotKey>,
 }
 
 impl HotkeyHandle {
-    /// 建管理器：OS 层失败（极少见）记成 `None`，面板靠应用内快捷键兜底，
-    /// 设置页展示原因。
+    /// 建句柄。管理器是惰性的（`shared_manager`），这里不碰 OS——
+    /// 真正的注册在 `rebind`，失败原因由它带给设置页展示。
     pub fn new() -> Self {
-        Self {
-            manager: GlobalHotKeyManager::new().ok(),
-            current: None,
-        }
+        Self { current: None }
     }
 
     /// 换绑：先解旧的再注册新的，失败回滚旧绑定（不断连）。
     /// 成功无事，失败返回中文原因，调用方展示 + 不入库。
     pub fn rebind(&mut self, spec: &str) -> Result<(), String> {
         let hotkey = parse_hotkey_spec(spec)?;
-        let Some(manager) = &self.manager else {
+        let Some(manager) = shared_manager() else {
             // “系统热键不可用”
             return Err(t("app.hotkey_unavailable"));
         };
         if self.current == Some(hotkey) {
             return Ok(());
         }
+        // 必须先解旧键：macOS 上同一组合不能重复注册（实测
+        // `Unable to register hotkey`），不解的话换回之前用过的键永远失败，
+        // 而且旧键会一直挂在系统上白占一个全局快捷键。
         let old = self.current.take();
+        if let Some(old) = old {
+            let _ = manager.unregister(old);
+        }
         match manager.register(hotkey) {
             Ok(()) => {
                 self.current = Some(hotkey);
@@ -198,6 +220,19 @@ impl HotkeyHandle {
     /// 当前注册的热键 id：轮询事件时对暗号，`None` 说明没注册成功。
     pub fn current_id(&self) -> Option<u32> {
         self.current.map(|hotkey| hotkey.id())
+    }
+}
+
+impl Drop for HotkeyHandle {
+    /// 句柄没了就把自己的键放掉：主窗关掉再开（托盘唤起走 `open_main_window`）
+    /// 会新建一个句柄并注册同一个组合，旧的还挂着的话新句柄注册必失败。
+    fn drop(&mut self) {
+        let Some(current) = self.current.take() else {
+            return;
+        };
+        if let Some(manager) = shared_manager() {
+            let _ = manager.unregister(current);
+        }
     }
 }
 
@@ -338,6 +373,7 @@ mod tests {
     use super::format_recorded;
     use super::keymap_binding_string;
     use super::parse_hotkey_spec;
+    use super::shared_manager;
     use crate::i18n::{lock_locale, set_language};
     use crate::settings::TempSettings;
 
@@ -377,6 +413,25 @@ mod tests {
             keymap_binding_string("Ctrl+Shift+P").as_deref(),
             Ok("ctrl-shift-p")
         );
+    }
+
+    #[test]
+    fn hotkey_manager_is_shared_across_handles() {
+        // macOS 的 `InstallEventHandler` 全进程只能装一个，第二个
+        // `GlobalHotKeyManager::new()` 直接 Err（实测 Operation not permitted）。
+        // 聚光键和截图键各建一个的话，后建的永远绑不上——所以必须共用。
+        // 这里连着调两次，断言拿到的是同一个实例。
+        let first = shared_manager();
+        let second = shared_manager();
+        match (first, second) {
+            (Some(a), Some(b)) => assert!(
+                std::ptr::eq(a, b),
+                "两次拿到的必须是同一个管理器，否则第二个句柄的键绑不上"
+            ),
+            // 建不出管理器（无头/CI 环境）不算回归，跳过。
+            (None, None) => {}
+            _ => panic!("管理器要么一直有要么一直没有，不能时有时无"),
+        }
     }
 
     #[test]
