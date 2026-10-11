@@ -393,6 +393,9 @@ app:
   shot_history_empty:
     en: No captures yet, one will be kept here
     zh-CN: 还没有截图，截一张自动记在这里
+  shot_history_saved:
+    en: Saved to history
+    zh-CN: 已存入历史
   shot_hotkey_title:
     en: Screenshot hotkey
     zh-CN: 截图快捷键

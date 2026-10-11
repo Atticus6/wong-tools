@@ -232,6 +232,7 @@ mod tests {
         "app.shot_tab_settings",
         "app.shot_history_title",
         "app.shot_history_empty",
+        "app.shot_history_saved",
         "app.shot_hotkey_title",
         "app.shot_delete",
         "app.shot_clear",

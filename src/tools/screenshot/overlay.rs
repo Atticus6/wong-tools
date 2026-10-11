@@ -5,7 +5,6 @@
 //! 覆盖层只管框选：确定后裁剪写回主窗口的截图状态，预览/复制/保存不动。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
@@ -36,10 +35,6 @@ const MIN_SELECT: f32 = 3.0;
 /// 变暗层透明度。shotori 默认 0.55；深色桌面上太糊看不清，用 0.4，
 /// 选框内外不断层就行，不靠它藏东西。
 const DIM_ALPHA: f32 = 0.4;
-
-/// 写回主窗口的预览图 ID 计数器：和主窗口自截的计数器错开命名空间，
-// GPUI 按 id 缓存解码图，每次必须不同。
-static NEXT_CROPPED_ID: AtomicU64 = AtomicU64::new(1_000_000);
 
 /// RGBA 内存像素 → 可直接 `img()` 的 RenderImage。
 /// GPUI 要 BGRA（它自己的 PNG 解码路会换 R/B，我们跳过解码就得自己换），
@@ -538,20 +533,17 @@ impl SelectOverlay {
         window.remove_window();
     }
 
-    /// 收尾：缩略图写回主窗口，关覆盖层。主窗口没了就只关窗。
+    /// 收尾：裁剪结果写回主窗口进历史，关覆盖层。主窗口没了就只关窗。
     fn finish_with(
         &mut self,
         cropped: image::RgbaImage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Ok(preview) = super::thumbnail_png(&cropped) {
-            let id = NEXT_CROPPED_ID.fetch_add(1, Ordering::Relaxed);
-            let _ = self.shell.update(cx, |shell, cx| {
-                shell.set_shot(cropped, preview, id);
-                cx.notify();
-            });
-        }
+        let _ = self.shell.update(cx, |shell, cx| {
+            shell.set_shot(cropped);
+            cx.notify();
+        });
         window.remove_window();
     }
 

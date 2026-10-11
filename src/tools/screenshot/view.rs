@@ -1,17 +1,16 @@
 //! 截图工具视图：历史 / 设置双 tab。
-//! 历史：每次落盘一张（50 封顶）+ 瀑布流缩略图，点开展示；
-//! 设置：截图全局键录制（存档 + 热重绑 + 托盘菜单后缀刷新）。
+//! 历史是纯瀑布流（等比缩略图按原比例分列，无选中预览）；设置是截图
+//! 全局键录制（存档 + 热重绑 + 托盘菜单后缀刷新）。
 //! 纯逻辑在 `super`（`mod.rs`）和 `history`，覆盖层在 `overlay`；这里只做组装和状态。
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
+use gpui_kit::component::{ActiveTheme, Sizable as _};
 use gpui_kit::*;
 
 use crate::i18n::t;
@@ -26,13 +25,10 @@ enum ShotTab {
     Settings,
 }
 
-/// 截图工具的状态：原图留内存（复制/保存用），预览是缩略 PNG（进界面用），
+/// 截图工具的状态：截取即落盘进历史（图片库可见），界面只展缩略图；
 /// status 是操作反馈（一行小字，成功失败都写）。历史缩略图常驻内存
-/// （50 张 480px，几 MB），点开展示才读原图。
+/// （50 张 480px，几 MB）。没有选中预览——历史 tab 就是瀑布流本身。
 pub(crate) struct ShotState {
-    image: Option<image::RgbaImage>,
-    preview: Option<Vec<u8>>,
-    preview_id: u64,
     status: Option<String>,
     tab: ShotTab,
     history: Vec<ShotRecord>,
@@ -41,10 +37,6 @@ pub(crate) struct ShotState {
     pub(crate) recording: bool,
     hotkey_error: Option<String>,
 }
-
-/// 预览图 ID 计数器：GPUI 按 id 缓存解码后的图，每次截取必须换新 id，
-// 不然缓存里还是上一张。
-static NEXT_PREVIEW_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ShotState {
     pub(crate) fn empty() -> Self {
@@ -57,9 +49,6 @@ impl ShotState {
             }
         }
         Self {
-            image: None,
-            preview: None,
-            preview_id: 0,
             status: None,
             tab: ShotTab::History,
             history,
@@ -71,22 +60,14 @@ impl ShotState {
         }
     }
 
-    /// 全屏截取：原图 + 预览一起换；失败只写 status，不动旧图。成功进历史。
+    /// 全屏截取：直接落盘进历史；失败只写 status。成功给一行反馈
+    /// （新缩略图自己会出现在瀑布流首位）。
     fn capture(&mut self) {
-        let image = match crate::tools::screenshot::capture_primary() {
-            Ok(image) => image,
-            Err(e) => {
-                self.status = Some(e);
-                return;
-            }
-        };
-        match crate::tools::screenshot::thumbnail_png(&image) {
-            Ok(png) => {
+        match crate::tools::screenshot::capture_primary() {
+            Ok(image) => {
                 self.push_history(&image);
-                self.preview_id = NEXT_PREVIEW_ID.fetch_add(1, Ordering::Relaxed);
-                self.image = Some(image);
-                self.preview = Some(png);
-                self.status = None;
+                // “已存入历史”
+                self.status = Some(t("app.shot_history_saved"));
             }
             Err(e) => self.status = Some(e),
         }
@@ -108,13 +89,12 @@ impl ShotState {
 }
 
 impl WsShell {
-    /// 覆盖层确定后写回裁剪结果：原图 + 预览 + 新 id，状态清空，进历史。
-    pub(crate) fn set_shot(&mut self, image: image::RgbaImage, preview: Vec<u8>, id: u64) {
+    /// 覆盖层确定后写回裁剪结果：只进历史（界面就是瀑布流，新图自己
+    /// 出现在首位），顺手给一行反馈。
+    pub(crate) fn set_shot(&mut self, image: image::RgbaImage) {
         self.push_shot_history(&image);
-        self.shot.image = Some(image);
-        self.shot.preview = Some(preview);
-        self.shot.preview_id = id;
-        self.shot.status = None;
+        // “已存入历史”
+        self.shot.status = Some(t("app.shot_history_saved"));
     }
 
     /// 经 WsShell 落历史（`set_shot` 是它的方法，存取走它）。
@@ -128,25 +108,6 @@ impl WsShell {
         if let Err(e) = crate::tools::screenshot::overlay::SelectOverlay::open(shell, cx) {
             self.shot.status = Some(e);
             cx.notify();
-        }
-    }
-
-    /// 点开一条历史：原图读回展示（复制/保存行照常可用）。
-    fn open_history_item(&mut self, id: u64) {
-        let Some(rec) = self.shot.history.iter().find(|r| r.id == id).cloned() else {
-            return;
-        };
-        match super::history::read_full(&rec) {
-            Ok(image) => match crate::tools::screenshot::thumbnail_png(&image) {
-                Ok(png) => {
-                    self.shot.preview_id = NEXT_PREVIEW_ID.fetch_add(1, Ordering::Relaxed);
-                    self.shot.image = Some(image);
-                    self.shot.preview = Some(png);
-                    self.shot.status = None;
-                }
-                Err(e) => self.shot.status = Some(e),
-            },
-            Err(e) => self.shot.status = Some(e),
         }
     }
 
@@ -243,29 +204,64 @@ impl WsShell {
             .into_any_element()
     }
 
-    /// 历史 tab：当前结果（或截取入口）+ 瀑布流。
+    /// 历史 tab：截取操作行 + 瀑布流。没有选中预览——截取即落盘，
+    /// 新图直接出现在瀑布流首位。
     fn render_shot_history(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
         sidebar_w: f32,
     ) -> AnyElement {
-        let current = match self.shot.preview.clone() {
-            Some(png) => self.render_shot_result(png, cx).into_any_element(),
-            None => self.render_shot_empty(cx).into_any_element(),
-        };
         div()
             .flex()
             .flex_1()
             .flex_col()
             .min_h_0()
-            .child(current)
+            .child(self.render_shot_actions(cx))
             .child(self.render_history_grid(window, cx, sidebar_w))
             .into_any_element()
     }
 
-    /// 历史瀑布流：按列宽估高贪心分列，纵滚。缩略图读不到（外部删了）
-    /// 整格跳过，不崩；点开展示，进复制保存行。
+    /// 截取操作行：全屏 / 区域 + 状态反馈（一行小字）。
+    fn render_shot_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .px(px(16.))
+            .py(px(12.))
+            .child(
+                Button::new("shot-capture")
+                    // “截取全屏”
+                    .label(t("app.shot_capture"))
+                    .primary()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        // GDI 全屏捕获几百毫秒内完成，直接跑主线程。
+                        this.shot.capture();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("shot-region")
+                    // “区域选择”
+                    .label(t("app.shot_region"))
+                    .outline()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.open_region(cx))),
+            )
+            .children(self.shot.status.clone().map(|s| {
+                div().text_size(px(TEXT_SM)).text_color(muted).child(s)
+            }))
+            .into_any_element()
+    }
+
+    /// 历史瀑布流：按原图宽高比折显示高、贪心放最矮列，纵滚。
+    /// 缩略图是等比缩的（不裁剪不拉伸），展示只定宽（`w_full`，框架按
+    /// 图片自带宽高比出高），上下两道都不动比例。缩略图读不到（外部删了）
+    /// 整格跳过，不崩。缩略图只做展示，不点选（选中预览已删）。
     fn render_history_grid(
         &self,
         window: &Window,
@@ -332,6 +328,12 @@ impl WsShell {
                                 let bytes = self.shot.thumbs.get(&rec.id)?.clone();
                                 let id = rec.id;
                                 Some(
+                                    // 注意：缩略图外层不能用 `Button`——普通 Button
+                                    // 写死高度（Medium `h_8` 32px），图会被压成
+                                    // 一条窄带（外层 `overflow_hidden` 再把溢出
+                                    // 裁掉）。这里纯展示，不点选（选中预览已删，
+                                    // 所以也不用 id / cursor），高度跟着图片
+                                    // 宽高比自然走。
                                     div()
                                         .relative()
                                         .border_1()
@@ -339,22 +341,12 @@ impl WsShell {
                                         .rounded(px(8.))
                                         .overflow_hidden()
                                         .child(
-                                            Button::new(ElementId::named_usize("shot-hist", ix))
-                                                .ghost()
-                                                .p(px(0.))
-                                                .cursor_pointer()
-                                                .child(
-                                                    img(ImageSource::Image(Arc::new(Image {
-                                                        format: ImageFormat::Png,
-                                                        bytes,
-                                                        id,
-                                                    })))
-                                                    .w_full(),
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_history_item(id);
-                                                    cx.notify();
-                                                })),
+                                            img(ImageSource::Image(Arc::new(Image {
+                                                format: ImageFormat::Png,
+                                                bytes,
+                                                id,
+                                            })))
+                                            .w_full(),
                                         )
                                         .child(
                                             Button::new(ElementId::named_usize(
@@ -510,161 +502,5 @@ impl WsShell {
                 cx.notify();
             }
         }
-    }
-
-    /// 还没截过：大按钮 + 说明。
-    fn render_shot_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(10.))
-            .py(px(16.))
-            .child(Icon::new(IconName::Camera).size(px(28.)).text_color(muted))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        Button::new("shot-capture")
-                            // “截取全屏”
-                            .label(t("app.shot_capture"))
-                            .primary()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // GDI 全屏捕获几百毫秒内完成，直接跑主线程。
-                                this.shot.capture();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("shot-region")
-                            // “区域选择”
-                            .label(t("app.shot_region"))
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.open_region(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_SM))
-                    .text_color(muted)
-                    // “截取主显示器全屏”
-                    .child(t("app.shot_capture_hint")),
-            )
-            .children(self.shot.status.clone().map(|s| {
-                div().text_size(px(TEXT_SM)).text_color(muted).child(s)
-            }))
-    }
-
-    /// 截过了：预览图 + 复制 / 保存 / 重截 + 区域 + 状态行。
-    fn render_shot_result(&self, png: Vec<u8>, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .px(px(16.))
-            .py(px(12.))
-            .gap(px(8.))
-            .child(
-                div()
-                    .border_1()
-                    .border_color(border)
-                    .rounded(px(8.))
-                    .child(
-                        img(ImageSource::Image(Arc::new(Image {
-                            format: ImageFormat::Png,
-                            bytes: png,
-                            id: self.shot.preview_id,
-                        })))
-                        .max_w(px(640.))
-                        .max_h(px(400.)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        Button::new("shot-copy")
-                            // “复制”
-                            .label(t("app.shot_copy"))
-                            .small()
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(img) = this.shot.image.clone() {
-                                    // “已复制到剪贴板”
-                                    let done = t("app.shot_copied");
-                                    this.shot.status = Some(
-                                        crate::tools::screenshot::copy_image(&img)
-                                            .map(|_| done)
-                                            .unwrap_or_else(|e| e),
-                                    );
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("shot-save")
-                            // “保存”
-                            .label(t("app.shot_save"))
-                            .small()
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(img) = this.shot.image.clone() {
-                                    let path = crate::tools::screenshot::pictures_dir()
-                                        .join(crate::tools::screenshot::timestamped_name());
-                                    this.shot.status = Some(
-                                        match crate::tools::screenshot::save_png(&img, &path) {
-                                            // “已保存到”
-                                            Ok(()) => format!(
-                                                "{}：{}",
-                                                t("app.shot_saved"),
-                                                path.display()
-                                            ),
-                                            Err(e) => e,
-                                        },
-                                    );
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("shot-retake")
-                            // “重新截取”
-                            .label(t("app.shot_retake"))
-                            .small()
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.shot.capture();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("shot-reregion")
-                            // “区域选择”
-                            .label(t("app.shot_region"))
-                            .small()
-                            .outline()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.open_region(cx))),
-                    ),
-            )
-            .children(self.shot.status.clone().map(|s| {
-                div().text_size(px(TEXT_SM)).text_color(muted).child(s)
-            }))
     }
 }

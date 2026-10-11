@@ -17,10 +17,6 @@ use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-/// 预览图最大边（逻辑像素思路：够看清、不占内存）。
-pub const PREVIEW_MAX_W: u32 = 640;
-pub const PREVIEW_MAX_H: u32 = 400;
-
 /// 截主显示器全屏，返回 RGBA 像素。
 pub fn capture_primary() -> Result<image::RgbaImage, String> {
     // macOS 先验屏幕录制权限：没授权时底下拿到的只是纯壁纸（其他窗口全缺），
@@ -150,7 +146,7 @@ pub fn overlay_placement(
     }
 }
 
-/// RgbaImage 编成 PNG 字节（预览和落盘都用它）。
+/// RgbaImage 编成 PNG 字节（缩略图落盘前走内存，单测也靠它验编码）。
 pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgba8(img.clone())
@@ -159,10 +155,19 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// 等比缩略到界限内再编 PNG，给预览用（原图太大不直接进界面）。
-pub fn thumbnail_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
-    let thumb = image::imageops::thumbnail(img, PREVIEW_MAX_W, PREVIEW_MAX_H);
-    encode_png(&thumb)
+/// 等比适配：把 `w`×`h` 按原比例收进 `bound_w`×`bound_h` 框，
+/// 返回目标尺寸（宽高都 ≥1）。注意 `image::imageops::thumbnail`
+/// **不保比例**（实测 800×400 进 480×480 框出来还是 480×480，
+/// 直接拉伸变形），所以调用方先用它算出等比尺寸再缩。
+/// 小图也放大到贴框（和原来行为一致，列里不留空洞）。
+pub fn fit_within(w: u32, h: u32, bound_w: u32, bound_h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 || bound_w == 0 || bound_h == 0 {
+        return (1, 1);
+    }
+    let scale = (bound_w as f64 / w as f64).min(bound_h as f64 / h as f64);
+    let tw = ((w as f64 * scale).round() as u32).max(1);
+    let th = ((h as f64 * scale).round() as u32).max(1);
+    (tw, th)
 }
 
 /// 原图存 PNG（扩展名决定格式，调用方保证是 `.png`）。
@@ -190,13 +195,31 @@ pub fn copy_image(img: &image::RgbaImage) -> Result<(), String> {
     Ok(())
 }
 
-/// 图片库下的 WongTools 目录（`%USERPROFILE%\Pictures\WongTools`）。
+/// 图片库下的 WongTools 目录：用户可见、可直接管理截图。
+/// Windows 走 `%USERPROFILE%\Pictures`，macOS 走 `~/Pictures`，
+/// Linux 走 `$XDG_PICTURES_DIR`（没有则 `~/Pictures`）。历史截图和手动
+/// 保存都落在这里（历史另起子目录，见 `history::history_dir`）。
 pub fn pictures_dir() -> PathBuf {
-    let pictures = std::env::var("USERPROFILE")
+    #[cfg(windows)]
+    let base = std::env::var("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("Pictures");
-    pictures.join("WongTools")
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("Pictures");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let base = std::env::var("XDG_PICTURES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("Pictures")
+        });
+    base.join("WongTools")
 }
 
 /// 按 Unix 秒拼文件名（ASCII 安全，不用处理中文路径的幺蛾子）。
@@ -215,9 +238,10 @@ mod tests {
     use super::MonitorGeometry;
     use super::copy_image;
     use super::encode_png;
+    use super::fit_within;
     use super::overlay_placement;
+    use super::pictures_dir;
     use super::save_png;
-    use super::thumbnail_png;
     use super::timestamped_name;
 
     /// 2x2 纯色测试图，不依赖显示器。
@@ -235,18 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_stays_within_bounds() {
-        let big = image::RgbaImage::from_pixel(100, 50, image::Rgba([0, 255, 0, 255]));
-        let bytes = thumbnail_png(&big).expect("能缩略");
-        let thumb = image::load_from_memory(&bytes).expect("缩略图能解码");
-        assert!(
-            thumb.width() <= 640 && thumb.height() <= 400,
-            "缩略图超界"
-        );
-        assert!(thumb.width() > thumb.height(), "等比关系坏了");
-    }
-
-    #[test]
     fn save_png_writes_readable_file() {
         let path =
             std::env::temp_dir().join(format!("wong-tools-shot-{}.png", std::process::id()));
@@ -261,6 +273,29 @@ mod tests {
         let name = timestamped_name();
         assert!(name.is_ascii(), "文件名必须 ASCII 安全");
         assert!(name.ends_with(".png"), "扩展名必须是 .png");
+    }
+
+    #[test]
+    fn fit_within_keeps_ratio_and_stays_in_box() {
+        // 宽图贴宽边、高图贴高边，另一边按比例收，绝不超框。
+        assert_eq!(fit_within(800, 400, 640, 400), (640, 320));
+        assert_eq!(fit_within(400, 800, 640, 400), (200, 400));
+        assert_eq!(fit_within(100, 100, 480, 480), (480, 480));
+        // 零尺寸不除零，给 1×1 占位（调用方不会拿零尺寸进来）。
+        assert_eq!(fit_within(0, 100, 480, 480), (1, 1));
+    }
+
+    #[test]
+    fn pictures_dir_is_visible_library_not_appdata() {
+        // 手动保存和历史都进用户图片库，文件管理器直接看得到。
+        assert!(
+            pictures_dir().ends_with("WongTools"),
+            "应用图片目录名别乱改"
+        );
+        assert!(
+            !pictures_dir().to_string_lossy().contains("shot-history"),
+            "pictures_dir 本体别带历史子目录，历史另挂一层"
+        );
     }
 
     #[test]
