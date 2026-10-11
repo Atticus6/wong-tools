@@ -41,8 +41,8 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
 - `src/shell.rs`——`WsShell`：38px 自绘标题栏（品牌 + 拖拽区 + 经
   `WindowControlArea` 接管的原生标题栏按钮）+ 侧边导航（216px，
   标题右侧（紧靠标题）收起按钮（官方 `SidebarToggleButton` 没透出 tooltip，
-  自建同款 ghost 图标按钮）一键收起成 52px 图标列）+ 内容区。工具只剩 5 个：截图 / 代理 / AI 转发是真工具
-  （状态在 `WsShell.shot` / `WsShell.proxy` / `WsShell.airelay`），
+  自建同款 ghost 图标按钮）一键收起成 52px 图标列）+ 内容区。工具共 6 个：截图 / 代理 / AI 转发 / 咖啡是真工具
+  （状态在 `WsShell.shot` / `WsShell.proxy` / `WsShell.airelay` / `WsShell.coffee`），
   欢迎是占位首页，设置页是真交互（语言 / 主题用 Combobox 下拉，
   状态 entity 放 `WsShell`，选中走订阅事件应用；聚光面板也能改，
   `render` 里对账防过期；版式照官方 Settings：描边卡片 + 左文右控件），选中态和收起态暂存 `WsShell`（收起随手持久化，启动恢复）。
@@ -131,6 +131,26 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   同服节点（同出口 IP 额度是通的），单轮最多 5 次。每次尝试记一行
   （节点名 + 失败原因都记，`egress_node` 列），界面是官方 DataTable。
   阻塞式线程模型，不引入新异步运行时；上游调用扔连接线程，别卡界面。
+- `src/tools/coffee/`——咖啡（防休眠）：端起咖啡举系统断言，盖上盖子放行。
+  杯子是简约线条手写 SVG，经 resvg 烤成位图（`mod.rs` 的 `cup_svg` +
+  `render_cup_rgba`，描边画形、杯身全镂空，唯一的实心是咖啡液；
+  tiny-skia 预乘 alpha 要拆一次；`view.rs` 经覆盖层同款 `rgba_to_render_image`
+  换 BGRA 直显——整条路零 PNG 编解码，新帧同步上传，不闪；之前每帧换新 PNG
+  走异步解码，杯子一直在闪刷。单测锁尺寸/图层/动静/深浅配色差异）：
+  开盖是液面 + 三缕蛇形蒸汽（相位错开，上浮 + 摇摆 + 淡入消散，120ms 烤一帧，
+  只在开着时转；合盖深浅静态帧各烤一张复用，换主题直接换着显示）。
+  配色跟 `cx.theme().mode` 走（深色拿铁色，浅色奶油色），杯子直接摆不套卡片
+  （套了像多出来的框），状态是圆点 + 胶囊行（开着主题绿，合着灰）。
+  `view.rs` 工具页（杯子 + 开关 + 时长预设 + 屏幕开关 + 自定义分钟）。
+  守卫按平台三套：Windows 调 `SetThreadExecutionState`（kernel32 直连，
+  `ES_CONTINUOUS` 常驻不用续命）；macOS 挂 `caffeinate -i`（开屏幕开关多挂
+  `-d`，不用 `-u` 免得点亮已熄的屏）；Linux 挂 `systemd-inhibit`，
+  非 systemd 环境直接报错。子进程 PID 随手入库（`coffee_pid`），正常放行
+  （stop/退出）即清；崩了/被杀没清掉，下次启动按 PID 验命令行
+  （`caffeinate` / `systemd-inhibit…sleep` 才认，防 PID 重用错杀）认领杀掉，
+  隧道旗同款。Windows 断言跟进程走，不可能残留，不记 PID。时长预设 15 分–4 小时 + 常开，开着可换
+  （到期点按新时长重定）；自定义 1–1440 分钟。到期自动盖，
+  时长和屏幕开关持久化，运行态不恢复（重启默认合盖），退出靠 `Drop` 放行。
 - 冻结帧走 `RenderImage` 直显（RGBA→BGRA 自己换一次）：全分辨率 PNG
   编解码在 debug 下要几秒，覆盖层必须零编码打开。开窗尺寸用传进去的
   逻辑界，别读构造期的 `window.bounds()`（不可靠）。

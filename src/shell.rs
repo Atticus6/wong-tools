@@ -82,6 +82,7 @@ enum ToolId {
     Screenshot,
     Proxy,
     AiRelay,
+    Coffee,
     Settings,
 }
 
@@ -97,6 +98,8 @@ impl ToolId {
             ToolId::Proxy => t("app.tool_proxy"),
             // “AI 转发”
             ToolId::AiRelay => t("app.tool_airelay"),
+            // “咖啡”
+            ToolId::Coffee => t("app.tool_coffee"),
             // “设置”
             ToolId::Settings => t("app.tool_settings"),
         }
@@ -113,6 +116,8 @@ impl ToolId {
             ToolId::Proxy => t("app.tool_proxy_hint"),
             // “Zen 免费模型网关”
             ToolId::AiRelay => t("app.tool_airelay_hint"),
+            // “端起咖啡，电脑不睡”
+            ToolId::Coffee => t("app.tool_coffee_hint"),
             // “主题与偏好”
             ToolId::Settings => t("app.tool_settings_hint"),
         }
@@ -143,6 +148,10 @@ const TOOLS: &[ToolDef] = &[
         icon: IconName::Bot,
     },
     ToolDef {
+        id: ToolId::Coffee,
+        icon: IconName::Coffee,
+    },
+    ToolDef {
         id: ToolId::Settings,
         icon: IconName::Settings,
     },
@@ -162,11 +171,12 @@ pub(crate) struct ToolEntry {
 /// 侧边栏顺序的工具入口（聚光搜索跳转命令用）。
 pub(crate) fn tool_entries() -> Vec<ToolEntry> {
     const KEYWORDS: &[&str] = &[
-        // 欢迎 / 截图 / 代理 / AI 转发 / 设置
+        // 欢迎 / 截图 / 代理 / AI 转发 / 咖啡 / 设置
         "welcome home start",
         "screenshot capture printscreen",
         "proxy vless vpn tunnel",
         "ai relay zen models gateway",
+        "coffee caffeine keepawake awake fangxiumian",
         "settings preferences hotkey",
     ];
     TOOLS
@@ -211,6 +221,7 @@ pub struct WsShell {
     pub(crate) proxy: crate::tools::proxy::ProxyView,
     pub(crate) spotlight: crate::spotlight::SpotlightView,
     pub(crate) airelay: crate::tools::airelay::view::AiRelayView,
+    pub(crate) coffee: crate::tools::coffee::CoffeeView,
 }
 
 impl WsShell {
@@ -256,6 +267,7 @@ impl WsShell {
             proxy: crate::tools::proxy::ProxyView::new(window, cx),
             spotlight: crate::spotlight::SpotlightView::new(cx),
             airelay: crate::tools::airelay::view::AiRelayView::new(window, cx),
+            coffee: crate::tools::coffee::CoffeeView::new(window, cx),
             lang_combo,
             theme_combo,
             // 订阅先空着，下面建完再填。
@@ -672,8 +684,7 @@ impl WsShell {
             .child(self.render_tool_body(tool, window, cx, sidebar_w))
     }
 
-    /// 各工具的主体：设置页是真交互，其他工具暂时是空状态占位。
-    /// 真工具落地时在这里加分支，每个分支调自己视图的渲染。
+    /// 各工具的主体：每个分支调自己视图的渲染（欢迎是占位，其他都是真工具）。
     fn render_tool_body(
         &self,
         tool: &ToolDef,
@@ -685,6 +696,7 @@ impl WsShell {
             ToolId::Screenshot => self.render_shot(cx).into_any_element(),
             ToolId::Proxy => self.render_proxy(window, cx, sidebar_w).into_any_element(),
             ToolId::AiRelay => self.render_airelay(window, cx, sidebar_w).into_any_element(),
+            ToolId::Coffee => self.render_coffee(cx).into_any_element(),
             ToolId::Settings => self.render_settings(cx).into_any_element(),
             _ => self.render_placeholder(tool, cx).into_any_element(),
         }
@@ -763,6 +775,8 @@ impl Drop for WsShell {
         if let Some(relay) = self.airelay.running.take() {
             relay.stop();
         }
+        // 咖啡断言跟进程走：守卫 drop 即放行（被杀则系统自动回收）。
+        self.coffee.shutdown();
     }
 }
 

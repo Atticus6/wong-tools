@@ -9,3 +9,6 @@ pub mod proxy;
 
 /// AI 转发：本地 OpenAI / Anthropic 兼容网关，转到 Zen 免费车道。
 pub mod airelay;
+
+/// 咖啡：端起防休眠，盖上放行（时长 + 屏幕开关持久化，运行态不恢复）。
+pub mod coffee;

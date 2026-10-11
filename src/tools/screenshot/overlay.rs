@@ -31,8 +31,8 @@ static NEXT_CROPPED_ID: AtomicU64 = AtomicU64::new(1_000_000);
 
 /// RGBA 内存像素 → 可直接 `img()` 的 RenderImage。
 /// GPUI 要 BGRA（它自己的 PNG 解码路会换 R/B，我们跳过解码就得自己换），
-/// 集中在这一个函数里，别处不要再换一次。
-fn rgba_to_render_image(img: &image::RgbaImage) -> Arc<RenderImage> {
+/// 集中在这一个函数里，别处不要再换一次（咖啡杯逐帧直显也走这里）。
+pub(crate) fn rgba_to_render_image(img: &image::RgbaImage) -> Arc<RenderImage> {
     let mut bgra = img.clone().into_raw();
     // 长度永远是 4 的倍数，余数分支走不到，纯粹让编译器闭嘴。
     for px in bgra.chunks_exact_mut(4) {

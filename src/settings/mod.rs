@@ -52,6 +52,14 @@ const KEY_HOTKEY: &str = "hotkey";
 const KEY_AIRELAY_PORT: &str = "airelay_port";
 /// AI 转发强制模型（空串 = 跟随客户端）。
 const KEY_AIRELAY_MODEL: &str = "airelay_model";
+/// 咖啡时长（分钟字符串，"-1" = 常开）。
+const KEY_COFFEE_MINUTES: &str = "coffee_minutes";
+/// 咖啡屏幕常亮（"1" = 屏幕也不熄）：随手存，启动恢复。
+const KEY_COFFEE_DISPLAY: &str = "coffee_display";
+/// 咖啡断言子进程 PID（macOS/Linux 才有）：起断言成功后记，正常放行时清；
+/// 没清掉说明上次没收尾（崩溃/被杀），下次启动按 PID 认领收尾。
+/// Windows 断言跟进程走，不可能残留，不写这个键。
+const KEY_COFFEE_PID: &str = "coffee_pid";
 
 /// 应用数据目录（平台相关，见模块文档）。
 pub fn data_dir() -> PathBuf {
@@ -693,6 +701,79 @@ pub fn set_airelay_model(model: &str) -> Result<(), String> {
     })
 }
 
+/// 读咖啡时长：外层 `None` = 没存过/非法/库坏（调用方回落默认 1 小时），
+/// 内层 `None` = 常开，`Some(m)` = m 分钟。
+pub fn coffee_minutes() -> Option<Option<u64>> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_COFFEE_MINUTES).await.ok()?
+    })?;
+    let trimmed = raw.trim();
+    if trimmed == "-1" {
+        return Some(None);
+    }
+    trimmed.parse::<u64>().ok().filter(|m| *m > 0).map(Some)
+}
+
+/// 存咖啡时长（`None` = 常开，记 "-1"）。0 分钟没有意义，直接拒绝入库。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_coffee_minutes(minutes: Option<u64>) -> Result<(), String> {
+    if matches!(minutes, Some(0)) {
+        return Err("时长不能是 0".to_string());
+    }
+    let value = minutes.map(|m| m.to_string()).unwrap_or_else(|| "-1".to_string());
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_COFFEE_MINUTES, &value).await
+    })
+}
+
+/// 读咖啡屏幕常亮；没存过、非法、库坏了都返回 `None`，调用方回落只保主机。
+pub fn coffee_display() -> Option<bool> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_COFFEE_DISPLAY).await.ok()?
+    })?;
+    match raw.as_str() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// 存咖啡屏幕常亮（点开关即调，低频）。
+/// 失败返回错误信息，调用方记一笔日志即可。
+pub fn set_coffee_display(display: bool) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_COFFEE_DISPLAY, if display { "1" } else { "0" }).await
+    })
+}
+
+/// 读咖啡断言子进程 PID；没存过、非法（0/瞎写）、库坏了都返回 `None`，
+/// 调用方当没开过（最多漏杀一次孤儿，绝不错杀）。
+pub fn coffee_pid() -> Option<u32> {
+    let raw = block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_COFFEE_PID).await.ok()?
+    })?;
+    raw.trim().parse::<u32>().ok().filter(|pid| *pid > 0)
+}
+
+/// 存/清咖啡断言 PID（`None` = 清掉）。起断言成功后记，正常放行（stop、
+/// 退出）时清。失败返回错误信息，调用方记一笔日志即可（记不住顶多下次
+/// 启动少一次孤儿清理，不断言本身不受影响）。
+pub fn set_coffee_pid(pid: Option<u32>) -> Result<(), String> {
+    if matches!(pid, Some(0)) {
+        return Err("PID 不能是 0".to_string());
+    }
+    let value = pid.map(|p| p.to_string()).unwrap_or_default();
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_COFFEE_PID, &value).await
+    })
+}
+
 /// AI 转发单条请求记录（`airelay_requests` 一行）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRequest {
@@ -1200,5 +1281,63 @@ mod tests {
         assert_eq!(airelay_model().as_deref(), Some("mimo-v2.6-flash-free"));
         set_airelay_model("  ").expect("空串能写");
         assert_eq!(airelay_model(), None, "空串是跟随");
+    }
+
+    #[test]
+    fn coffee_prefs_roundtrip_with_fallback() {
+        // 咖啡时长 + 屏幕开关走公共 API 往返：空库读 None（调用方回落默认），
+        // 写完读回一致；非法值读 None。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("coffee-prefs");
+        use super::coffee_display;
+        use super::coffee_minutes;
+        use super::set_coffee_display;
+        use super::set_coffee_minutes;
+        assert_eq!(coffee_minutes(), None, "没存过读 None");
+        assert_eq!(coffee_display(), None, "没存过读 None");
+        set_coffee_minutes(Some(90)).expect("能写时长");
+        set_coffee_display(true).expect("能写屏幕开关");
+        assert_eq!(coffee_minutes(), Some(Some(90)), "分钟往返一致");
+        assert_eq!(coffee_display(), Some(true), "开关往返一致");
+        set_coffee_minutes(None).expect("常开能写");
+        assert_eq!(coffee_minutes(), Some(None), "常开读回是内层 None");
+        assert!(set_coffee_minutes(Some(0)).is_err(), "0 分钟拒绝入库");
+        // 非法存档读 None（调用方回落默认 1 小时）。
+        super::block_on(async {
+            let path = std::env::var("WONG_SETTINGS_DB").expect("临时库已指向");
+            let conn = super::open(std::path::Path::new(&path))
+                .await
+                .expect("测试库能打开");
+            super::set(&conn, super::KEY_COFFEE_MINUTES, "abc")
+                .await
+                .expect("能种坏数据");
+        });
+        assert_eq!(coffee_minutes(), None, "非法时长读 None");
+    }
+
+    #[test]
+    fn coffee_pid_roundtrip_and_rejects_garbage() {
+        // 断言 PID 走公共 API 往返：空库读 None，记完读回一致，清掉读 None；
+        // 非法值读 None（调用方当没开过，宁可漏杀不错杀）。
+        let _guard = crate::i18n::lock_locale();
+        let _settings = TempSettings::install("coffee-pid");
+        use super::coffee_pid;
+        use super::set_coffee_pid;
+        assert_eq!(coffee_pid(), None, "没存过读 None");
+        set_coffee_pid(Some(12345)).expect("能记 PID");
+        assert_eq!(coffee_pid(), Some(12345), "PID 往返一致");
+        set_coffee_pid(None).expect("能清 PID");
+        assert_eq!(coffee_pid(), None, "清掉读 None");
+        assert!(set_coffee_pid(Some(0)).is_err(), "0 不是合法 PID");
+        super::block_on(async {
+            let path = std::env::var("WONG_SETTINGS_DB").expect("临时库已指向");
+            let conn = super::open(std::path::Path::new(&path))
+                .await
+                .expect("测试库能打开");
+            super::set(&conn, super::KEY_COFFEE_PID, "abc")
+                .await
+                .expect("能种坏数据");
+        });
+        assert_eq!(coffee_pid(), None, "非法 PID 读 None");
     }
 }

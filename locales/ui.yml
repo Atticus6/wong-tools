@@ -498,3 +498,60 @@ app:
   airelay_codex_done:
     en: Codex config written
     zh-CN: Codex 配置已写入
+  tool_coffee:
+    en: Coffee
+    zh-CN: 咖啡
+  tool_coffee_hint:
+    en: Pick up the cup, machine stays awake
+    zh-CN: 端起咖啡，电脑不睡
+  coffee_start:
+    en: Pick up the coffee
+    zh-CN: 端起咖啡
+  coffee_stop:
+    en: Put the lid on
+    zh-CN: 盖上盖子
+  coffee_running:
+    en: Steaming · staying awake
+    zh-CN: 冒着热气 · 保持唤醒
+  coffee_stopped:
+    en: Lid on · resting
+    zh-CN: 盖着盖子 · 休息中
+  coffee_no_limit:
+    en: No limit
+    zh-CN: 常开
+  coffee_remaining:
+    en: '{} left'
+    zh-CN: 剩余 {}
+  coffee_duration:
+    en: Duration
+    zh-CN: 时长
+  coffee_min_fmt:
+    en: '{} min'
+    zh-CN: '{} 分钟'
+  coffee_hour_fmt:
+    en: '{} hr'
+    zh-CN: '{} 小时'
+  coffee_display:
+    en: Keep display on too
+    zh-CN: 屏幕也常亮
+  coffee_display_hint:
+    en: Only the machine stays awake by default
+    zh-CN: 默认只防主机休眠，屏幕照常可熄
+  coffee_custom:
+    en: Custom
+    zh-CN: 自定义
+  coffee_custom_hint:
+    en: Minutes, e.g. 90
+    zh-CN: 输入分钟数，如 90
+  coffee_apply:
+    en: Apply
+    zh-CN: 使用
+  coffee_bad_custom:
+    en: Enter 1–1440 minutes
+    zh-CN: 分钟数要在 1–1440 之间
+  coffee_expired:
+    en: Time is up, lid is back on
+    zh-CN: 时间到，已盖上盖子
+  coffee_failed:
+    en: Failed to keep awake
+    zh-CN: 防休眠启动失败

@@ -195,6 +195,42 @@ fn cleanup_owned_proxy() {
     }
 }
 
+/// 杀掉上次没收尾的咖啡断言子进程：正常放行会清 PID，还留着说明上次
+/// 是崩了/被杀。Windows 断言跟进程走，不可能残留，直接跳过。
+/// 只杀命令行对得上的（PID 可能被系统回收重用，错杀别的进程就闯祸了）；
+/// 认过就清旗——杀没杀成都清，留着下次还来认，没完没了。
+fn cleanup_owned_coffee() {
+    // Windows 没记过 PID，无事可做（函数留着，调用方不用再分平台）。
+    #[cfg(windows)]
+    {
+        return;
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(pid) = crate::settings::coffee_pid() else {
+            return;
+        };
+        // 验明正身：还活着 + 命令行是我们的断言进程（`caffeinate` /
+        // `systemd-inhibit … sleep`）。`ps -o command=` 两边都认。
+        let owned = std::process::Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+            .is_some_and(|cmd| {
+                cmd.contains("caffeinate")
+                    || (cmd.contains("systemd-inhibit") && cmd.contains("sleep"))
+            });
+        if owned {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
+        }
+        let _ = crate::settings::set_coffee_pid(None);
+    }
+}
+
 fn main() {
     // 崩溃上报先行：panic hook 是进程级的，放第一行，后面哪崩都抓得到。
     // 初始化失败只记日志，应用照常启动。
@@ -213,6 +249,9 @@ fn main() {
         // 上次非正常退出可能留下系统代理指向已死的隧道：先清掉再开窗，
         // 不然用户一启动就断网，还以为是新 bug。
         cleanup_owned_proxy();
+        // 同理：上次崩了/被杀可能留下咖啡断言孤儿（macOS 的 caffeinate
+        // 子进程跟父进程不同命），先认领杀掉，不然机器一直不睡。
+        cleanup_owned_coffee();
 
         // 快捷键：组件默认在 `init` 里注册，应用的后加。
         // 官方文档做法（https://gpui-kit.com/docs/keybinding/ ）：
