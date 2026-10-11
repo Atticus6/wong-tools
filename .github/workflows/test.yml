@@ -5,7 +5,11 @@
 name: test
 
 on:
+  # 只监听分支 push：tag 触发走 package.yml（里面自带测试门禁），
+  # 不然打一次 tag 会同时起 test 和 package 两套。
   push:
+    branches:
+      - "**"
   pull_request:
 
 permissions:

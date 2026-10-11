@@ -1,4 +1,4 @@
-# 打包发布：push `v*` tag 或手动触发时，三平台并行构建出包
+# 打包发布：push `v*` tag 或手动触发时，先过测试门禁再三平台并行构建出包
 #（mac 出 arm64 + x64 双架构）；tag 触发最后由 release 作业汇总建
 # GitHub Release（只建一次）。
 # 版本号只认 Cargo.toml，tag 只是扳机；mac 包标识见 packaging/Info.plist。
@@ -22,7 +22,31 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  # 测试门禁：和 test.yml 同一套（Windows 才有桌面会话），不过不打包。
+  # tag 触发时 test.yml 不跑（只监听分支），门禁只能放这里。
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: 编译检查
+        run: cargo check --locked --all-targets 2>&1 | Select-Object -Last 40
+
+      # 全量不断言过滤：桌面那 3 个用例在跑者桌面会话里能过，
+      # 挂了就是真问题，不要加 -E 排除蒙混。
+      - name: 全量单测
+        run: cargo nextest run --locked 2>&1 | Select-Object -Last 60
+
   package:
+    needs: [test]
     strategy:
       fail-fast: false
       matrix:
