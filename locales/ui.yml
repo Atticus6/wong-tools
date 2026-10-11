@@ -399,6 +399,9 @@ app:
   shot_hotkey_title:
     en: Screenshot hotkey
     zh-CN: 截图快捷键
+  shot_ocr_hotkey_title:
+    en: OCR hotkey
+    zh-CN: 识别快捷键
   shot_delete:
     en: Delete
     zh-CN: 删除
@@ -444,12 +447,42 @@ app:
   shot_draw_hint:
     en: Drag inside the selection to draw
     zh-CN: 在选区内拖拽绘制
+  shot_ocr:
+    en: Recognize text
+    zh-CN: 识别
+  shot_ocr_busy:
+    en: Recognizing…
+    zh-CN: 识别中…
+  shot_ocr_empty:
+    en: No text found
+    zh-CN: 没识别到文字
+  shot_ocr_copied:
+    en: Recognized and copied
+    zh-CN: 已识别并复制
+  shot_ocr_title:
+    en: Recognition result
+    zh-CN: 识别结果
+  shot_ocr_count:
+    en: '{} characters'
+    zh-CN: 共 {} 字
+  shot_ocr_hint:
+    en: Drag to select, release to recognize
+    zh-CN: 拖拽框选区域，松手即识别
+  shot_ocr_unavailable:
+    en: Text recognition isn't available on this platform
+    zh-CN: 当前平台不支持文字识别
+  shot_ocr_nolanguage:
+    en: No OCR language pack installed, add one in system settings
+    zh-CN: 系统缺少 OCR 语言包，去系统设置里添加对应语言
   tray_show:
     en: Show main window
     zh-CN: 显示主窗口
   tray_shot:
     en: Screenshot
     zh-CN: 截图
+  tray_ocr:
+    en: Recognize text
+    zh-CN: 识别文字
   tray_quit:
     en: Quit
     zh-CN: 退出

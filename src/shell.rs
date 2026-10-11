@@ -279,14 +279,14 @@ impl WsShell {
             // 同上，录制拦截的订阅在下面建。
             hotkey_capture: Subscription::new(|| {}),
         };
-        // 快捷键录制（呼出键 + 截图键共用一个拦截器）：走
+        // 快捷键录制（呼出键 + 截图键 + 识别键共用一个拦截器）：走
         // `App::intercept_keystrokes`（窗口级、在动作解析之前）。
         //
         // **不能**用元素上的 `capture_key_down`：那个只跑在聚焦路径上，
         // 而录制一开，承载按钮的那一行就被“按下快捷键…”的提示行顶掉了
         // （截图键那边还额外 `window.blur()` 扔焦点）。按钮卸载 → 焦点丢失
         // → 聚焦路径塌回根节点 → 行级/根级监听都收不到按键，录制成了死键。
-        // 拦截器不看焦点，两个录制都稳；录制期间 `stop_propagation` 顺带
+        // 拦截器不看焦点，三个录制都稳；录制期间 `stop_propagation` 顺带
         // 挡住回车/空格把刚点的按钮再点一遍。
         let weak = cx.entity().downgrade();
         this.hotkey_capture = cx.intercept_keystrokes(move |event, window, cx| {
@@ -294,10 +294,16 @@ impl WsShell {
             if window.window_handle().window_id() != main_window_id {
                 return;
             }
-            let (shot, palette) = weak
-                .read_with(cx, |this, _| (this.shot.recording, this.spotlight.recording))
-                .unwrap_or((false, false));
-            if !shot && !palette {
+            let (shot, ocr, palette) = weak
+                .read_with(cx, |this, _| {
+                    (
+                        this.shot.recording,
+                        this.shot.ocr_recording,
+                        this.spotlight.recording,
+                    )
+                })
+                .unwrap_or((false, false, false));
+            if !shot && !ocr && !palette {
                 return;
             }
             cx.stop_propagation();
@@ -305,6 +311,8 @@ impl WsShell {
             let _ = weak.update(cx, |this, cx| {
                 if shot {
                     this.record_shot_hotkey(&stroke, cx);
+                } else if ocr {
+                    this.record_ocr_hotkey(&stroke, cx);
                 } else {
                     this.record_hotkey(&stroke, cx);
                 }
@@ -413,6 +421,7 @@ impl WsShell {
         self.selected = ix;
         self.spotlight.recording = false;
         self.shot.recording = false;
+        self.shot.ocr_recording = false;
         if let Err(e) = crate::settings::set_selected_tool(ix) {
             eprintln!("存选中工具失败: {e}");
         }

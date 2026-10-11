@@ -288,7 +288,7 @@ fn main() {
             // 会把先绑的顶掉（后来居上），面板确认键就坏了。上下文绑定的只在
             // 覆盖层聚焦时生效，平时不消费任何输入。
             use crate::tools::screenshot::overlay::{
-                ShotCancel, ShotCopy, ShotPin, ShotRedo, ShotSave, ShotUndo,
+                ShotCancel, ShotCopy, ShotOcr, ShotPin, ShotRedo, ShotSave, ShotUndo,
             };
             let mut bindings = vec![
                 KeyBinding::new("up", PaletteUp, None),
@@ -300,6 +300,8 @@ fn main() {
                 KeyBinding::new("ctrl-c", ShotCopy, Some("ShotOverlay")),
                 KeyBinding::new("ctrl-s", ShotSave, Some("ShotOverlay")),
                 KeyBinding::new("ctrl-p", ShotPin, Some("ShotOverlay")),
+                // 划词 OCR：覆盖层聚焦时 Ctrl+T 直接识别当前选区。
+                KeyBinding::new("ctrl-t", ShotOcr, Some("ShotOverlay")),
                 // 撤销/重做：输入框聚焦时走 Input 自己的上下文（更深优先），
                 // 不会跟文字输入打架。
                 KeyBinding::new("ctrl-z", ShotUndo, Some("ShotOverlay")),
@@ -436,7 +438,7 @@ mod tests {
         // `KeyBinding::new` 非法直接 panic（启动即崩），这里先验一遍
         // 覆盖层用到的全部按键串，改键时 broken 第一时间爆出来。
         use crate::tools::screenshot::overlay::{
-            ShotCancel, ShotCopy, ShotPin, ShotRedo, ShotSave, ShotUndo,
+            ShotCancel, ShotCopy, ShotOcr, ShotPin, ShotRedo, ShotSave, ShotUndo,
         };
         let _ = vec![
             KeyBinding::new("escape", ShotCancel, Some("ShotOverlay")),
@@ -444,6 +446,7 @@ mod tests {
             KeyBinding::new("ctrl-c", ShotCopy, Some("ShotOverlay")),
             KeyBinding::new("ctrl-s", ShotSave, Some("ShotOverlay")),
             KeyBinding::new("ctrl-p", ShotPin, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-t", ShotOcr, Some("ShotOverlay")),
             KeyBinding::new("ctrl-z", ShotUndo, Some("ShotOverlay")),
             KeyBinding::new("ctrl-shift-z", ShotRedo, Some("ShotOverlay")),
             KeyBinding::new("ctrl-y", ShotRedo, Some("ShotOverlay")),

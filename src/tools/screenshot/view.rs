@@ -25,6 +25,13 @@ enum ShotTab {
     Settings,
 }
 
+/// 设置 tab 里两行改键行的区分：截图键 / 识别键（行渲染共用一套）。
+#[derive(Clone, Copy)]
+enum ShotHotkeyKind {
+    Shot,
+    Ocr,
+}
+
 /// 截图工具的状态：截取即落盘进历史（图片库可见），界面只展缩略图；
 /// status 是操作反馈（一行小字，成功失败都写）。历史缩略图常驻内存
 /// （50 张 480px，几 MB）。没有选中预览——历史 tab 就是瀑布流本身。
@@ -36,6 +43,10 @@ pub(crate) struct ShotState {
     hotkey_spec: String,
     pub(crate) recording: bool,
     hotkey_error: Option<String>,
+    /// 识别键原文 + 录制态 + 行内错误：和截图键同一套，分开记互不顶。
+    ocr_hotkey_spec: String,
+    pub(crate) ocr_recording: bool,
+    ocr_hotkey_error: Option<String>,
 }
 
 impl ShotState {
@@ -57,6 +68,10 @@ impl ShotState {
                 .unwrap_or_else(|| crate::tray::SHOT_HOTKEY.to_string()),
             recording: false,
             hotkey_error: None,
+            ocr_hotkey_spec: crate::settings::ocr_hotkey()
+                .unwrap_or_else(|| crate::tray::OCR_HOTKEY.to_string()),
+            ocr_recording: false,
+            ocr_hotkey_error: None,
         }
     }
 
@@ -97,6 +112,11 @@ impl WsShell {
         self.shot.status = Some(t("app.shot_history_saved"));
     }
 
+    /// 往截图状态行写一句话（OCR 成功反馈用，不碰历史）。
+    pub(crate) fn set_shot_status(&mut self, status: String) {
+        self.shot.status = Some(status);
+    }
+
     /// 经 WsShell 落历史（`set_shot` 是它的方法，存取走它）。
     fn push_shot_history(&mut self, image: &image::RgbaImage) {
         self.shot.push_history(image);
@@ -106,6 +126,16 @@ impl WsShell {
     pub(crate) fn open_region(&mut self, cx: &mut Context<Self>) {
         let shell = cx.entity().downgrade();
         if let Err(e) = crate::tools::screenshot::overlay::SelectOverlay::open(shell, cx) {
+            self.shot.status = Some(e);
+            cx.notify();
+        }
+    }
+
+    /// OCR 直达覆盖层：松手即自动识别（托盘「识别文字」入口）。
+    /// 没引擎直接写状态行，不开窗。
+    pub(crate) fn open_region_for_ocr(&mut self, cx: &mut Context<Self>) {
+        let shell = cx.entity().downgrade();
+        if let Err(e) = crate::tools::screenshot::overlay::SelectOverlay::open_for_ocr(shell, cx) {
             self.shot.status = Some(e);
             cx.notify();
         }
@@ -134,6 +164,23 @@ impl WsShell {
             Recorded::Ignore => {}
             // 有效组合：落定走恢复默认同一条路（重绑 + 入库 + 菜单后缀刷新）。
             Recorded::Spec(spec) => self.apply_shot_hotkey(spec, cx),
+        }
+    }
+
+    /// 识别键录制：和截图键同一套，只是落定走识别自己的重绑 + 入库。
+    /// 两个录制互斥（拦截器里按优先级分发，同时只会进一个）。
+    pub(crate) fn record_ocr_hotkey(&mut self, stroke: &Keystroke, cx: &mut Context<Self>) {
+        use crate::spotlight::{Recorded, format_recorded};
+        match format_recorded(stroke) {
+            // Esc：退出录制，保持原快捷键。
+            Recorded::Cancel => {
+                self.shot.ocr_recording = false;
+                cx.notify();
+            }
+            // 纯修饰键/裸键：继续等。
+            Recorded::Ignore => {}
+            // 有效组合：落定走恢复默认同一条路（重绑 + 入库 + 菜单后缀刷新）。
+            Recorded::Spec(spec) => self.apply_ocr_hotkey(spec, cx),
         }
     }
 
@@ -185,6 +232,7 @@ impl WsShell {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.shot.tab = ShotTab::History;
                         this.shot.recording = false;
+                        this.shot.ocr_recording = false;
                         cx.notify();
                     })),
             )
@@ -198,6 +246,7 @@ impl WsShell {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.shot.tab = ShotTab::Settings;
                         this.shot.recording = false;
+                        this.shot.ocr_recording = false;
                         cx.notify();
                     })),
             )
@@ -376,7 +425,8 @@ impl WsShell {
             .into_any_element()
     }
 
-    /// 设置 tab：截图全局键卡片（版式和应用设置页同一套）。
+    /// 设置 tab：截图全局键 + 识别全局键两张卡片（版式和应用设置页同一套）。
+    /// 没引擎的平台只留截图那张（识别键注册了也进不来，不摆）。
     fn render_shot_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
@@ -389,9 +439,18 @@ impl WsShell {
             .child(self.settings_section(
                 // “截图快捷键”
                 t("app.shot_hotkey_title"),
-                self.shot_hotkey_rows(cx),
+                self.shot_hotkey_rows(ShotHotkeyKind::Shot, cx),
                 cx,
             ))
+            .children(super::ocr::is_available().then(|| {
+                self.settings_section(
+                    // “识别快捷键”
+                    t("app.shot_ocr_hotkey_title"),
+                    self.shot_hotkey_rows(ShotHotkeyKind::Ocr, cx),
+                    cx,
+                )
+                .into_any_element()
+            }))
             .into_any_element()
     }
 
@@ -401,22 +460,38 @@ impl WsShell {
     /// 点了要 `blur()` 扔焦点，焦点一没行级监听就哑了（实测：怎么按都不录）。
     /// 真正的接键在 `shell` 的 `intercept_keystrokes`，和焦点无关。
     /// 切 tab/切工具顺手关录制（行没了就别再录了）。
-    fn shot_hotkey_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn shot_hotkey_rows(&self, kind: ShotHotkeyKind, cx: &mut Context<Self>) -> Vec<AnyElement> {
         use gpui_kit::component::button::Button;
 
         let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
         let red = cx.theme().red;
+        let (row_id, change_id, reset_id) = match kind {
+            ShotHotkeyKind::Shot => ("shot-hotkey-row", "shot-hotkey-change", "shot-hotkey-reset"),
+            ShotHotkeyKind::Ocr => ("ocr-hotkey-row", "ocr-hotkey-change", "ocr-hotkey-reset"),
+        };
+        let (spec, recording, error) = match kind {
+            ShotHotkeyKind::Shot => (
+                &self.shot.hotkey_spec,
+                self.shot.recording,
+                &self.shot.hotkey_error,
+            ),
+            ShotHotkeyKind::Ocr => (
+                &self.shot.ocr_hotkey_spec,
+                self.shot.ocr_recording,
+                &self.shot.ocr_hotkey_error,
+            ),
+        };
         // 录制中标题显示提示，否则显示当前组合。
-        let title = if self.shot.recording {
+        let title = if recording {
             // “按下快捷键…，Esc 取消”
             t("app.hotkey_recording")
         } else {
-            crate::spotlight::display_hotkey(&self.shot.hotkey_spec)
+            crate::spotlight::display_hotkey(spec)
         };
         let mut rows = vec![
             div()
-                .id("shot-hotkey-row")
+                .id(row_id)
                 .flex()
                 .flex_none()
                 .items_center()
@@ -443,34 +518,53 @@ impl WsShell {
                         .items_center()
                         .gap(px(8.))
                         .child(
-                            Button::new("shot-hotkey-change")
+                            Button::new(change_id)
                                 // “修改”（录制中再点 = 取消）
                                 .label(t("app.hotkey_change"))
                                 .small()
                                 .outline()
                                 .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.shot.recording = !this.shot.recording;
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let was = match kind {
+                                        ShotHotkeyKind::Shot => this.shot.recording,
+                                        ShotHotkeyKind::Ocr => this.shot.ocr_recording,
+                                    };
+                                    // 两个录制互斥：开一边先把另一边关了。
+                                    this.shot.recording = false;
+                                    this.shot.ocr_recording = false;
+                                    match kind {
+                                        ShotHotkeyKind::Shot => this.shot.recording = !was,
+                                        ShotHotkeyKind::Ocr => this.shot.ocr_recording = !was,
+                                    }
                                     // 焦点扔掉：留在按钮上，回车/空格会误触重录。
                                     window.blur(cx);
                                     cx.notify();
                                 })),
                         )
                         .child(
-                            Button::new("shot-hotkey-reset")
+                            Button::new(reset_id)
                                 // “恢复默认”
                                 .label(t("app.hotkey_reset"))
                                 .small()
                                 .outline()
                                 .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.apply_shot_hotkey(crate::tray::SHOT_HOTKEY.to_string(), cx);
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    match kind {
+                                        ShotHotkeyKind::Shot => this.apply_shot_hotkey(
+                                            crate::tray::SHOT_HOTKEY.to_string(),
+                                            cx,
+                                        ),
+                                        ShotHotkeyKind::Ocr => this.apply_ocr_hotkey(
+                                            crate::tray::OCR_HOTKEY.to_string(),
+                                            cx,
+                                        ),
+                                    }
                                 })),
                         ),
                 )
                 .into_any_element(),
         ];
-        if let Some(error) = &self.shot.hotkey_error {
+        if let Some(error) = error {
             rows.push(
                 div()
                     .text_size(px(TEXT_SM))
@@ -499,6 +593,28 @@ impl WsShell {
             }
             Err(e) => {
                 self.shot.hotkey_error = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 识别键落定：重绑 + 入库 + 菜单后缀刷新（三件必须一起成）。
+    /// 修改/恢复默认共用；失败只写行内错误，保持录制态可重试。
+    fn apply_ocr_hotkey(&mut self, spec: String, cx: &mut Context<Self>) {
+        match (|| {
+            cx.global_mut::<crate::tray::OcrHotkey>().handle.rebind(&spec)?;
+            crate::settings::set_ocr_hotkey(&spec)?;
+            Ok::<(), String>(())
+        })() {
+            Ok(()) => {
+                crate::tray::update_ocr_menu_label(&mut *cx, &spec);
+                self.shot.ocr_hotkey_spec = spec;
+                self.shot.ocr_hotkey_error = None;
+                self.shot.ocr_recording = false;
+                cx.notify();
+            }
+            Err(e) => {
+                self.shot.ocr_hotkey_error = Some(e);
                 cx.notify();
             }
         }

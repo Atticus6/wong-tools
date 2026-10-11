@@ -5239,6 +5239,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-ocr"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c231a38c8918ce0d3ba9a3768c93be775128d3bbd8ea775148ecd12477ca1697"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-vision",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5943,6 +5957,17 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-location",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-vision"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
 
@@ -10611,6 +10636,7 @@ dependencies = [
  "image",
  "libsql",
  "muda",
+ "native-ocr",
  "native-tls",
  "posthog-rs",
  "rand 0.8.8",

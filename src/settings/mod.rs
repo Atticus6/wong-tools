@@ -50,6 +50,8 @@ const KEY_SIDEBAR_COLLAPSED: &str = "sidebar_collapsed";
 const KEY_HOTKEY: &str = "hotkey";
 /// 截图全局快捷键（同上写法，见 `tray::SHOT_HOTKEY` 默认）。
 const KEY_SHOT_HOTKEY: &str = "shot_hotkey";
+/// 识别全局快捷键（同上写法，见 `tray::OCR_HOTKEY` 默认）。
+const KEY_OCR_HOTKEY: &str = "ocr_hotkey";
 /// 截图历史记录（`ShotRecord` 数组 JSON，见 screenshot/history）。
 const KEY_SHOT_HISTORY: &str = "shot_history";
 /// AI 转发网关端口（字符串存，非法回落默认）。
@@ -672,6 +674,23 @@ pub fn set_shot_hotkey(spec: &str) -> Result<(), String> {
     block_on(async {
         let conn = open(&db_path()).await?;
         set(&conn, KEY_SHOT_HOTKEY, spec).await
+    })
+}
+
+/// 读识别全局快捷键原文；没存过或库坏了返回 `None`，
+/// 调用方回落默认（`tray::OCR_HOTKEY`）。
+pub fn ocr_hotkey() -> Option<String> {
+    block_on(async {
+        let conn = open(&db_path()).await.ok()?;
+        get(&conn, KEY_OCR_HOTKEY).await.ok()?
+    })
+}
+
+/// 存识别快捷键原文。调用方先过 `spotlight` 的解析，非法不进库。
+pub fn set_ocr_hotkey(spec: &str) -> Result<(), String> {
+    block_on(async {
+        let conn = open(&db_path()).await?;
+        set(&conn, KEY_OCR_HOTKEY, spec).await
     })
 }
 

@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt"] }
 toml_edit = "0.22"
 tungstenite = { version = "0.24", features = ["native-tls"] }
 muda = "0.21"
+native-ocr = "0.1.0"
 tray-icon = "0.26"
 ureq = { version = "2.10", features = ["json"] }
 xcap = "0.9"

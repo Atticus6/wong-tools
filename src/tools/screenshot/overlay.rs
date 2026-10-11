@@ -26,7 +26,7 @@ use crate::shell::WsShell;
 // 面板确认键顶掉（见 main 的注释）。
 gpui_kit::actions!(
     shot,
-    [ShotCopy, ShotSave, ShotPin, ShotCancel, ShotUndo, ShotRedo]
+    [ShotCopy, ShotSave, ShotPin, ShotOcr, ShotCancel, ShotUndo, ShotRedo]
 );
 
 const TEXT_SM: f32 = 12.0;
@@ -93,11 +93,36 @@ pub struct SelectOverlay {
     /// 输入框事件订阅：必须存着，drop 即退订，输入中就收不到改字事件了。
     /// 和 `text_editor` 同生共死。
     text_sub: Option<Subscription>,
+    /// OCR 直达：托盘「识别文字」进来时为 true，松手定稿即自动识别
+    /// （Bob 式划词，不用再点一次工具条按钮）；普通截图进来为 false。
+    ocr_armed: bool,
+    /// OCR 在途：按钮置灰防重入，识别是阻塞调用，后台线程跑。
+    ocr_busy: bool,
+    /// OCR 失败原因：工具条下方红字展示，成功/重选即清。
+    ocr_error: Option<String>,
 }
 
 impl SelectOverlay {
     /// 截屏并打开覆盖层。失败返回错误，主窗口直接显示，不开窗。
     pub fn open(shell: WeakEntity<WsShell>, cx: &mut App) -> Result<(), String> {
+        Self::open_inner(shell, false, cx)
+    }
+
+    /// OCR 直达：和 `open` 同一层冻结帧，松手即自动识别（托盘菜单用）。
+    /// 没引擎时调用方别进（按钮藏了，托盘项置灰），这里再守一次。
+    pub fn open_for_ocr(shell: WeakEntity<WsShell>, cx: &mut App) -> Result<(), String> {
+        if !super::ocr::is_available() {
+            return Err(t("app.shot_ocr_unavailable"));
+        }
+        Self::open_inner(shell, true, cx)
+    }
+
+    /// 截屏并打开覆盖层。失败返回错误，主窗口直接显示，不开窗。
+    fn open_inner(
+        shell: WeakEntity<WsShell>,
+        ocr_armed: bool,
+        cx: &mut App,
+    ) -> Result<(), String> {
         let t0 = std::time::Instant::now();
         // 先冻结再开窗：用户看到的第一帧就是截到的那张，不闪。
         // 冻结帧走 RenderImage 直显，不经过 PNG 编解码（debug 下全分辨率
@@ -164,6 +189,7 @@ impl SelectOverlay {
                     placement.size.1,
                     placement.top_inset,
                     frozen_h,
+                    ocr_armed,
                     window,
                     cx,
                 )
@@ -183,6 +209,7 @@ impl SelectOverlay {
         lh: f32,
         top_inset: f32,
         frozen_h: f32,
+        ocr_armed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -207,6 +234,9 @@ impl SelectOverlay {
             draft_img: None,
             text_editor: None,
             text_sub: None,
+            ocr_armed,
+            ocr_busy: false,
+            ocr_error: None,
         }
     }
 
@@ -292,6 +322,16 @@ impl SelectOverlay {
             self.scale,
         );
         Some(img)
+    }
+
+    /// 当前选区的原图裁剪（不带标注）：OCR 用它——画上去的箭头/马赛克
+    /// 会污染识别，标注和文字识别是两条路。坐标换算和 `cropped` 同一份。
+    fn cropped_raw(&self) -> Option<image::RgbaImage> {
+        let rect = self.selection()?;
+        let rect = super::select::translate(rect, 0., self.top_inset);
+        let (x, y, w, h) =
+            super::select::to_pixels(rect, self.scale, self.image.width(), self.image.height())?;
+        Some(super::select::crop(&self.image, x, y, w, h))
     }
 
     /// 窗口区底图：从捕获图里按窗内坐标裁（预览层做底，标注直接盖上去）。
@@ -533,6 +573,75 @@ impl SelectOverlay {
         window.remove_window();
     }
 
+    /// 识别选区文字（Bob 式划词）：裁原图→后台识别→自动复制→结果浮窗。
+    /// 成功关覆盖层开结果窗，文本已在剪贴板里；失败留在覆盖层，选区还在，
+    /// 错误行展示原因可重试。没选区/在途/没引擎直接回，不打扰。
+    fn start_ocr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 输入框开着时回车是“提交文字”不是识别（和复制同款 guard）。
+        if self.text_editor.is_some() {
+            if self.commit_text_editor() {
+                self.refresh_committed();
+            }
+            self.refresh_draft();
+            cx.notify();
+            return;
+        }
+        if self.ocr_busy || !super::ocr::is_available() {
+            return;
+        }
+        let Some(raw) = self.cropped_raw() else {
+            return;
+        };
+        self.ocr_busy = true;
+        self.ocr_error = None;
+        cx.notify();
+        // 关窗和开结果窗要窗口句柄：完成回调里没有 `Window`，先存着。
+        let overlay_handle = window.window_handle();
+        let shell = self.shell.clone();
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            // Vision 单张约 1 秒，阻塞调用扔后台线程（自检同款姿势）。
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    match super::ocr::recognize(&raw) {
+                        Ok(text) => {
+                            // 自动复制：结果窗只是展示，文本认出来就算到手。
+                            if let Err(e) = super::ocr::copy_text(&text) {
+                                eprintln!("OCR 复制失败: {e}");
+                            }
+                            Ok(text)
+                        }
+                        Err(e) => Err(e),
+                    }
+                })
+                .await;
+            cx.update(|cx| {
+                match outcome {
+                    Ok(text) => {
+                        // 主窗口留一行反馈（“已识别并复制”），覆盖层关掉，
+                        // 结果浮窗随后打开：三步哪步失败都不崩，尽力而为。
+                        let _ = shell.update(cx, |shell, cx| {
+                            shell.set_shot_status(t("app.shot_ocr_copied"));
+                            cx.notify();
+                        });
+                        let _ = super::ocr::OcrWindow::open(text, cx);
+                        let _ = overlay_handle
+                            .update(cx, |_, window, _| window.remove_window());
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.ocr_busy = false;
+                            view.ocr_error = Some(e);
+                            cx.notify();
+                        });
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     /// 收尾：裁剪结果写回主窗口进历史，关覆盖层。主窗口没了就只关窗。
     fn finish_with(
         &mut self,
@@ -649,6 +758,9 @@ impl Render for SelectOverlay {
             .on_action(cx.listener(|this, _: &ShotPin, window, cx| {
                 this.finish_pin(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShotOcr, window, cx| {
+                this.start_ocr(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ShotCancel, window, cx| {
                 this.cancel(window, cx);
             }))
@@ -718,8 +830,14 @@ impl Render for SelectOverlay {
                     .child(label)
                     .into_any_element()
             }))
-            // 没选区时的居中提示。工具激活后换成绘制提示。
+            // 没选区时的居中提示。OCR 直达换一句，明确松手即识别。
             .children(sel.is_none().then(|| {
+                // “拖拽框选区域” / “拖拽框选区域，松手即识别”
+                let hint = if self.ocr_armed {
+                    t("app.shot_ocr_hint")
+                } else {
+                    t("app.shot_hint")
+                };
                 div()
                     .flex_1()
                     .flex()
@@ -727,8 +845,7 @@ impl Render for SelectOverlay {
                     .justify_center()
                     .text_size(px(15.))
                     .text_color(white().opacity(0.8))
-                    // “拖拽框选区域”
-                    .child(t("app.shot_hint"))
+                    .child(hint)
                     .into_any_element()
             }))
             .children(
@@ -851,6 +968,26 @@ impl Render for SelectOverlay {
                         t("app.shot_pin"),
                         cx.listener(|this, _, window, cx| this.finish_pin(window, cx)),
                     ))
+                    // 划词 OCR：系统原生引擎（Vision/WinRT），Linux 没引擎不摆。
+                    // 在途置灰防重按；点即识别当前选区，不用二次确认。
+                    .children(super::ocr::is_available().then(|| {
+                        let tip = if self.ocr_busy {
+                            // “识别中…”
+                            t("app.shot_ocr_busy")
+                        } else {
+                            // “识别”
+                            t("app.shot_ocr")
+                        };
+                        Button::new("overlay-ocr")
+                            .tooltip(tip)
+                            .cursor_pointer()
+                            .size(px(30.))
+                            .rounded(px(5.))
+                            .disabled(self.ocr_busy)
+                            .icon(IconName::ScanText)
+                            .on_click(cx.listener(|this, _, window, cx| this.start_ocr(window, cx)))
+                            .into_any_element()
+                    }))
                     .child(div().w(px(1.)).h(px(18.)).mx(px(4.)).bg(bar_border))
                     .child(toolbar_icon(
                         "overlay-cancel",
@@ -859,6 +996,24 @@ impl Render for SelectOverlay {
                         t("app.shot_cancel"),
                         cx.listener(|this, _, window, cx| this.cancel(window, cx)),
                     ))
+            }))
+            // OCR 失败行：工具条下方红字，选区/重试都在，不挡框选。
+            .children((show_toolbar && self.ocr_error.is_some()).then(|| {
+                div()
+                    .absolute()
+                    .left(px(bx))
+                    .top(px(by + bh + 6.))
+                    .max_w(px(360.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_size(px(TEXT_SM))
+                    .text_color(cx.theme().red)
+                    .child(self.ocr_error.clone().unwrap_or_default())
+                    .into_any_element()
             }))
             // 第二排：粗细 + 颜色（参考截图第二排）。工具激活或输入中才摆出来。
             .children(show_options.then(|| {
@@ -1368,7 +1523,7 @@ fn pointer_sink(input: WeakEntity<SelectOverlay>) -> impl IntoElement {
                 });
             });
             let view = input.clone();
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                     return;
                 }
@@ -1382,6 +1537,14 @@ fn pointer_sink(input: WeakEntity<SelectOverlay>) -> impl IntoElement {
                     } else if this.dragging {
                         this.current = event.position;
                         this.end_drag();
+                        // OCR 直达：松手即识别（选区太小 start_ocr 自己回）。
+                        // 用户中途点了标注工具说明想画画，本次不再自动触发。
+                        if this.ocr_armed {
+                            this.ocr_armed = false;
+                            if this.ann.tool().is_none() {
+                                this.start_ocr(window, cx);
+                            }
+                        }
                         cx.notify();
                     }
                 });

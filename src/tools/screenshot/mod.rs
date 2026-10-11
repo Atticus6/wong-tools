@@ -5,6 +5,7 @@
 
 pub mod annotate;
 pub mod history;
+pub mod ocr;
 pub mod overlay;
 pub mod pin;
 pub mod select;
