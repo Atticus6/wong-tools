@@ -10107,6 +10107,7 @@ version = "0.2.0"
 dependencies = [
  "arboard",
  "chrono",
+ "cosmic-text",
  "global-hotkey",
  "gpui-kit",
  "image",

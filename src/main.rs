@@ -261,11 +261,28 @@ fn main() {
             use crate::spotlight::{
                 PaletteConfirm, PaletteDismiss, PaletteDown, PaletteUp, ToggleSpotlight,
             };
+            // 覆盖层动作走 `Some("ShotOverlay")` 上下文（shotori 同款），千万别用
+            // `None`：`enter`/`escape` 在聚光面板已经占了 `None` 上下文，后绑的
+            // 会把先绑的顶掉（后来居上），面板确认键就坏了。上下文绑定的只在
+            // 覆盖层聚焦时生效，平时不消费任何输入。
+            use crate::tools::screenshot::overlay::{
+                ShotCancel, ShotCopy, ShotPin, ShotRedo, ShotSave, ShotUndo,
+            };
             let mut bindings = vec![
                 KeyBinding::new("up", PaletteUp, None),
                 KeyBinding::new("down", PaletteDown, None),
                 KeyBinding::new("enter", PaletteConfirm, None),
                 KeyBinding::new("escape", PaletteDismiss, None),
+                KeyBinding::new("escape", ShotCancel, Some("ShotOverlay")),
+                KeyBinding::new("enter", ShotCopy, Some("ShotOverlay")),
+                KeyBinding::new("ctrl-c", ShotCopy, Some("ShotOverlay")),
+                KeyBinding::new("ctrl-s", ShotSave, Some("ShotOverlay")),
+                KeyBinding::new("ctrl-p", ShotPin, Some("ShotOverlay")),
+                // 撤销/重做：输入框聚焦时走 Input 自己的上下文（更深优先），
+                // 不会跟文字输入打架。
+                KeyBinding::new("ctrl-z", ShotUndo, Some("ShotOverlay")),
+                KeyBinding::new("ctrl-shift-z", ShotRedo, Some("ShotOverlay")),
+                KeyBinding::new("ctrl-y", ShotRedo, Some("ShotOverlay")),
             ];
             // 呼出键走用户存档：没存过回落默认，非法就跳过绑定
             // （设置页会展示原因）。`KeyBinding::new` 非法会 panic，
@@ -341,6 +358,7 @@ mod tests {
     use gpui_kit::size;
     use gpui_kit::point;
     use gpui_kit::Bounds;
+    use gpui_kit::KeyBinding;
     use gpui_kit::WindowBounds;
 
     /// 单屏（主屏 2560x1440，原点 0,0），各单测共用。
@@ -385,6 +403,25 @@ mod tests {
             min.width >= px(800.) && min.height >= px(500.),
             "最小尺寸太小，装不下标题栏 + 侧边栏：{min:?}"
         );
+    }
+
+    #[test]
+    fn overlay_keybindings_are_valid() {
+        // `KeyBinding::new` 非法直接 panic（启动即崩），这里先验一遍
+        // 覆盖层用到的全部按键串，改键时 broken 第一时间爆出来。
+        use crate::tools::screenshot::overlay::{
+            ShotCancel, ShotCopy, ShotPin, ShotRedo, ShotSave, ShotUndo,
+        };
+        let _ = vec![
+            KeyBinding::new("escape", ShotCancel, Some("ShotOverlay")),
+            KeyBinding::new("enter", ShotCopy, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-c", ShotCopy, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-s", ShotSave, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-p", ShotPin, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-z", ShotUndo, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-shift-z", ShotRedo, Some("ShotOverlay")),
+            KeyBinding::new("ctrl-y", ShotRedo, Some("ShotOverlay")),
+        ];
     }
 
     #[test]

@@ -336,6 +336,93 @@ app:
   shot_cancel:
     en: Cancel
     zh-CN: 取消
+  shot_pin:
+    en: Pin
+    zh-CN: 钉屏
+  shot_pin_title:
+    en: Pinned screenshot
+    zh-CN: 钉住的截图
+  shot_pin_reset:
+    en: Reset to 100%
+    zh-CN: 回到 100%
+  shot_pin_close:
+    en: Close
+    zh-CN: 关闭
+  shot_tool_rect:
+    en: Rectangle
+    zh-CN: 矩形
+  shot_tool_ellipse:
+    en: Ellipse
+    zh-CN: 椭圆
+  shot_tool_line:
+    en: Line
+    zh-CN: 直线
+  shot_tool_arrow:
+    en: Arrow
+    zh-CN: 箭头
+  shot_tool_pencil:
+    en: Pencil
+    zh-CN: 画笔
+  shot_tool_highlighter:
+    en: Highlighter
+    zh-CN: 荧光笔
+  shot_tool_mosaic:
+    en: Mosaic
+    zh-CN: 马赛克
+  shot_tool_text:
+    en: Text
+    zh-CN: 文字
+  shot_tool_eraser:
+    en: Eraser
+    zh-CN: 橡皮擦
+  shot_tool_undo:
+    en: Undo
+    zh-CN: 撤销
+  shot_tool_redo:
+    en: Redo
+    zh-CN: 重做
+  shot_clear:
+    en: Clear all annotations
+    zh-CN: 清空全部标注
+  shot_size_dec:
+    en: Thinner
+    zh-CN: 变细
+  shot_size_inc:
+    en: Thicker
+    zh-CN: 变粗
+  shot_c_red:
+    en: Red
+    zh-CN: 红
+  shot_c_orange:
+    en: Orange
+    zh-CN: 橙
+  shot_c_yellow:
+    en: Yellow
+    zh-CN: 黄
+  shot_c_green:
+    en: Green
+    zh-CN: 绿
+  shot_c_blue:
+    en: Blue
+    zh-CN: 蓝
+  shot_c_white:
+    en: White
+    zh-CN: 白
+  shot_c_gray:
+    en: Gray
+    zh-CN: 灰
+  shot_c_black:
+    en: Black
+    zh-CN: 黑
+  shot_text_hint:
+    en: Type text, Enter to confirm
+    zh-CN: 输入文字，回车确定
+  shot_color:
+    en: Color
+    zh-CN: 颜色
+  shot_draw_hint:
+    en: Drag inside the selection to draw
+    zh-CN: 在选区内拖拽绘制
   spotlight_hint:
     en: Search tools, commands, settings…
     zh-CN: 搜索工具、命令、设置…

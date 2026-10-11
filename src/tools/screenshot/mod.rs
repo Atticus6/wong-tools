@@ -3,7 +3,9 @@
 //! 只有纯逻辑，不碰 GPUI，方便单元测试。Windows 下 xcap 走 GDI 全屏捕获；
 //! 多显示器只截主显示器。区域框选见同目录的 `overlay`，矩形数学见 `select`。
 
+pub mod annotate;
 pub mod overlay;
+pub mod pin;
 pub mod select;
 pub mod view;
 

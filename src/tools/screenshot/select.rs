@@ -89,10 +89,38 @@ pub fn dim_rects(sel: Option<LogicRect>, w: f32, h: f32) -> Vec<(f32, f32, f32, 
     }
 }
 
-/// 工具条尺寸（逻辑像素）：3 个 30px 图标按钮 + 分隔符 + 间距 + 内边距。
-/// 渲染（overlay 工具条）和命中判定用同一组数，对不上就穿帮。
-pub const TOOLBAR_W: f32 = 128.0;
+/// 工具条尺寸（逻辑像素）：16 个 30px 图标按钮 + 3 个分隔符 + 间距 + 内边距。
+/// 构成：9 标注（矩形/椭圆/直线/箭头/画笔/荧光笔/马赛克/文字/橡皮擦）+ 清空
+/// + 2 历史（撤销/重做）+ 4 动作（复制/保存/钉屏/取消），共 16 钮 19 子项 →
+/// 18 个 4px 间隙，分隔符每个占 9px（1px 线 + 两侧 4px 边距），条内边距 16px。
+/// 480 + 72 + 27 + 16 = 595。
+/// 渲染（overlay 工具条）和命中判定用同一组数，对不上就穿帮；加按钮时同步
+/// 改这里和下面的位置测试（写死的坐标会立刻失败提醒）。
+pub const TOOLBAR_W: f32 = 595.0;
 pub const TOOLBAR_H: f32 = 36.0;
+
+/// 第二排（粗细 + 颜色）：−(30) + 读数(36) + +(30) + 分隔符(9) + 8 色板(8×28)，
+/// 12 个子项 → 11 个 4px 间隙，条内边距 16px。
+/// 96 + 1 + 8 + 224 + 44 + 16 = 389。
+pub const OPTIONS_W: f32 = 389.0;
+pub const OPTIONS_H: f32 = 36.0;
+
+/// 第二排矩形 (x, y, w, h)：贴在第一排下方，底下没地儿就挪到上方；
+/// 水平与第一排居中对齐，左右钳在窗内。
+pub fn options_rect(row: (f32, f32, f32, f32), w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let (rx, ry, rw, _rh) = row;
+    let x = if w > OPTIONS_W + 16. {
+        (rx + rw / 2. - OPTIONS_W / 2.).clamp(8., w - OPTIONS_W - 8.)
+    } else {
+        ((w - OPTIONS_W) / 2.).max(0.)
+    };
+    let y = if ry + TOOLBAR_H + 8. + OPTIONS_H <= h - 8. {
+        ry + TOOLBAR_H + 8.
+    } else {
+        (ry - 8. - OPTIONS_H).max(8.)
+    };
+    (x, y, OPTIONS_W, OPTIONS_H)
+}
 
 /// 工具条矩形 (x, y, w, h)：跟在选区下方，空间不够放上方，左右钳住；
 /// 没选区时回落到底部居中。shotori 同款：工具条只在松手定稿后出现，
@@ -241,14 +269,14 @@ mod tests {
             toolbar_rect(None, 1000., 800.),
             ((1000. - TOOLBAR_W) / 2., 800. - TOOLBAR_H - 16., TOOLBAR_W, TOOLBAR_H)
         );
-        // 选区在中间：跟下方，水平居中。
+        // 选区在中间：跟下方，水平居中（595px 宽条：200-297.5<0 → 钳到 8）。
         assert_eq!(
             toolbar_rect(
                 Some(super::LogicRect { x: 100., y: 100., w: 200., h: 100. }),
                 1000.,
                 800.
             ),
-            (136., 208., TOOLBAR_W, TOOLBAR_H)
+            (8., 208., TOOLBAR_W, TOOLBAR_H)
         );
         // 选区贴底：放不下就放上方。
         assert_eq!(
@@ -257,16 +285,36 @@ mod tests {
                 1000.,
                 800.
             ),
-            (136., 656., TOOLBAR_W, TOOLBAR_H)
+            (8., 656., TOOLBAR_W, TOOLBAR_H)
         );
-        // 选区贴右：水平钳住不飞出屏。
+        // 选区贴右：水平钳住不飞出屏（900+40-297.5=642.5 > 上限 397，钳到 397）。
         assert_eq!(
             toolbar_rect(
                 Some(super::LogicRect { x: 900., y: 100., w: 80., h: 60. }),
                 1000.,
                 800.
             ),
-            (864., 168., TOOLBAR_W, TOOLBAR_H)
+            (397., 168., TOOLBAR_W, TOOLBAR_H)
         );
+    }
+
+    #[test]
+    fn options_row_parks_under_first_row() {
+        use super::OPTIONS_H;
+        use super::OPTIONS_W;
+        use super::options_rect;
+        // 第一排在中间：第二排贴下面，水平居中对齐。
+        assert_eq!(
+            options_rect((226., 208., TOOLBAR_W, TOOLBAR_H), 1000., 800.),
+            (226. + (TOOLBAR_W - OPTIONS_W) / 2., 252., OPTIONS_W, OPTIONS_H)
+        );
+        // 第一排贴底（下面塞不下第二排）：第二排挪到上面。
+        assert_eq!(
+            options_rect((8., 750., TOOLBAR_W, TOOLBAR_H), 1000., 800.),
+            (8. + (TOOLBAR_W - OPTIONS_W) / 2., 706., OPTIONS_W, OPTIONS_H)
+        );
+        // 窄窗：居中钳住不飞出。
+        let (x, _, w, _) = options_rect((0., 100., TOOLBAR_W, TOOLBAR_H), 300., 800.);
+        assert_eq!((w, x), (OPTIONS_W, ((300. - OPTIONS_W) / 2.).max(0.)));
     }
 }
