@@ -68,6 +68,23 @@ GPUI）。UI 风格沿用 SpurGit（自绘标题栏、侧边栏外壳、语义�
   事件吃掉，不双跳。按键录制用 `capture_key_down` 读 `Keystroke` 现拼原文。
 - `src/shell.rs`——只剩框架：`WsShell`（字段 `pub(crate)`）、`TOOLS`、
   标题栏/侧边栏/分发、`Drop` 兜底。工具视图和设置页视图不在这。
+- `src/tray.rs`——系统托盘常驻（不是侧边栏工具）：关窗不退进程，
+  点托盘菜单的退出才是真退出（走正常退出钩子：存档/清代理都跑）。
+  事件走通道 + 前台定时轮询（`App::spawn` 的 future 跑在主线程，
+  托盘库回调在系统线程，直接碰 `App` 会炸 RefCell，泵里只做
+  `try_recv` + `cx.update` 分发）；`TrayIcon` 句柄必须存全局，
+  drop 就从托盘消失。主窗句柄记 `MainWindow` 全局，关窗钩子按
+  `WindowId` 清掉，唤起时重开不复活僵尸。菜单文案走 `t()`（构建时
+  取一次，运行时切语言不重建菜单）。分发逻辑抽纯函数单测。
+  平台差异（实测结论，换库前先重读）：mac 菜单栏只认单色模板图
+  （`tray-template.png` 白 W，`make-icons.py` 生成，随深浅自动反色；
+  Win/Linux 用彩色 32px）；mac 图标挂了菜单后左键必然弹菜单
+  （系统行为，左键直唤无解，保持右键菜单）；Windows 左键 Down/Up
+  都发事件 + 右键弹菜单，同一套接法左键唤出可用；Linux 缺
+  indicator 时建托盘失败只记日志（`libappindicator` 走 dlopen，
+  构建期无新增系统依赖，CI 不用加包），无托盘关窗后需重起进程。
+  跨平台编译本地验不了（C 依赖缺各平台 SDK 头，`--target` check
+  会倒在 ring 上），靠 CI 三平台矩阵兜底，改完托盘看一次 CI 全绿。
 - `src/updater/`——自动更新检查（不是侧边栏工具）：启动查一次 GitHub
   最新 Release（`ureq` 阻塞跑后台线程），有新版标题栏右上亮下载图标，
   点即浏览器跳 Release 页。按官方 auto-update 归属表只查不装：
